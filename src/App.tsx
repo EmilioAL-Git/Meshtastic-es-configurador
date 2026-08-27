@@ -308,31 +308,6 @@ function App() {
             )}
           </div>
 
-          {conn.status === "connected" && (
-            <div className="connect-buttons">
-              <button type="button" className="btn" onClick={handleSaveConfig}>
-                💾 Guardar configuración actual
-              </button>
-              <button type="button" className="btn" disabled={applying} onClick={handleUploadConfigClick}>
-                📤 Subir configuración
-              </button>
-              <input
-                ref={importFileInputRef}
-                type="file"
-                accept="application/json,.json"
-                className="visually-hidden"
-                onChange={handleUploadConfigFile}
-              />
-            </div>
-          )}
-          {conn.status === "connected" && (
-            <span className="hint">
-              El fichero es un perfil de dispositivo Meshtastic en JSON (el mismo formato que exportan la app oficial
-              y el CLI). Al subir uno solo se aplican las secciones que gestiona este configurador: nombre del nodo,
-              LoRa, canales y telemetría; el resto del perfil se ignora.
-            </span>
-          )}
-
           {conn.status !== "connected" && (
             <div className="field network-connect">
               <label htmlFor="network-address">Conectar por red (WiFi/IP)</label>
@@ -569,6 +544,31 @@ function App() {
           <aside className="panel side-panel">
             <h2>Configuración actual del nodo</h2>
             <DeviceInfoPanel snapshot={deviceSnapshot} />
+
+            {conn.status === "connected" && (
+              <>
+                <div className="connect-buttons">
+                  <button type="button" className="btn" onClick={handleSaveConfig}>
+                    💾 Guardar configuración actual
+                  </button>
+                  <button type="button" className="btn" disabled={applying} onClick={handleUploadConfigClick}>
+                    📤 Subir configuración
+                  </button>
+                  <input
+                    ref={importFileInputRef}
+                    type="file"
+                    accept="application/json,.json"
+                    className="visually-hidden"
+                    onChange={handleUploadConfigFile}
+                  />
+                </div>
+                <span className="hint">
+                  El fichero es un perfil de dispositivo Meshtastic en JSON (el mismo formato que exportan la app
+                  oficial y el CLI). Al subir uno solo se aplican las secciones que gestiona este configurador:
+                  nombre del nodo, LoRa, canales y telemetría; el resto del perfil se ignora.
+                </span>
+              </>
+            )}
           </aside>
         )}
         </div>

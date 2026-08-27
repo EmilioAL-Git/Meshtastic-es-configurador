@@ -166,6 +166,10 @@
   flex-wrap: wrap;
 }
 
+.side-panel .connect-buttons {
+  margin-top: 16px;
+}
+
 .connect-buttons .btn {
   flex: 1 1 160px;
 }

@@ -9,19 +9,20 @@ import {
   connectSerial,
   decodeCustomPsk,
   defaultSimplePsk,
+  describeDeviceProfile,
   downloadTextFile,
   encodePskBase64,
   exportDeviceProfileJson,
+  formatInterval,
   isWebBluetoothSupported,
   isWebSerialSupported,
   parseDeviceProfileJson,
-  summarizeDeviceProfile,
   translateError,
   type ChannelPreset,
   type DeviceProfile,
   type DeviceProfileSource,
-  type DeviceProfileSummary,
   type DeviceSnapshot,
+  type ProfileSummarySection,
 } from "./lib/meshtastic";
 import {
   getDefaultChannelName,
@@ -77,8 +78,10 @@ function App() {
   const [deviceSnapshot, setDeviceSnapshot] = useState<DeviceSnapshot | null>(null);
   const stopSnapshotTrackingRef = useRef<(() => void) | null>(null);
   const getDeviceProfileSourceRef = useRef<(() => DeviceProfileSource) | null>(null);
+  const connectingDeviceRef = useRef<MeshDevice | null>(null);
+  const connectSeqRef = useRef(0);
   const importFileInputRef = useRef<HTMLInputElement | null>(null);
-  const [importPending, setImportPending] = useState<{ profile: DeviceProfile; summary: DeviceProfileSummary } | null>(null);
+  const [importPending, setImportPending] = useState<{ profile: DeviceProfile; sections: ProfileSummarySection[] } | null>(null);
 
   const serialSupported = isWebSerialSupported();
   const bluetoothSupported = isWebBluetoothSupported();
@@ -97,10 +100,17 @@ function App() {
     if (via === "network" && networkAddress.trim() === "") return;
     stopSnapshotTrackingRef.current?.();
     stopSnapshotTrackingRef.current = null;
+    const seq = ++connectSeqRef.current;
+    connectingDeviceRef.current = null;
     setConn({ status: "connecting", via });
     setLog([]);
     setProgress(0);
     setDeviceSnapshot(null);
+    const onDeviceCreated = (device: MeshDevice) => {
+      // Guarda el dispositivo en cuanto existe (antes de que termine el handshake) para
+      // poder cancelarlo desde "Desconectar" mientras todavía está conectando.
+      if (connectSeqRef.current === seq) connectingDeviceRef.current = device;
+    };
     try {
       // La identidad/LoRa/canales/telemetría llegan durante el propio handshake, así
       // que hay que empezar a escucharlos desde ya (dentro de connectSerial/
@@ -108,15 +118,23 @@ function App() {
       // "Conectado", ya habrían pasado y el panel se quedaría esperando para siempre.
       const { device, stopSnapshotTracking, getDeviceProfileSource } =
         via === "usb"
-          ? await connectSerial(appendLog, setDeviceSnapshot)
+          ? await connectSerial(appendLog, setDeviceSnapshot, onDeviceCreated)
           : via === "bluetooth"
-            ? await connectBluetooth(appendLog, setDeviceSnapshot)
-            : await connectNetwork(networkHostPort, networkTls, appendLog, setDeviceSnapshot);
+            ? await connectBluetooth(appendLog, setDeviceSnapshot, onDeviceCreated)
+            : await connectNetwork(networkHostPort, networkTls, appendLog, setDeviceSnapshot, onDeviceCreated);
+      if (connectSeqRef.current !== seq) {
+        // Se canceló (botón "Desconectar") mientras conectaba: descarta esta conexión.
+        stopSnapshotTracking();
+        device.disconnect().catch(() => {});
+        return;
+      }
+      connectingDeviceRef.current = null;
       stopSnapshotTrackingRef.current = stopSnapshotTracking;
       getDeviceProfileSourceRef.current = getDeviceProfileSource;
       setConn({ status: "connected", via, device });
       appendLog(`Conectado por ${VIA_LABELS[via]}.`);
     } catch (err) {
+      if (connectSeqRef.current !== seq) return;
       setConn({ status: "error", message: translateError(err) });
     }
   }
@@ -136,14 +154,20 @@ function App() {
   }
 
   async function handleDisconnect() {
+    connectSeqRef.current++; // invalida cualquier connectSerial/Bluetooth/Network en curso
+    const wasConnecting = conn.status === "connecting";
     stopSnapshotTrackingRef.current?.();
     stopSnapshotTrackingRef.current = null;
     getDeviceProfileSourceRef.current = null;
     if (conn.status === "connected") {
       await conn.device.disconnect();
+    } else if (connectingDeviceRef.current) {
+      await connectingDeviceRef.current.disconnect().catch(() => {});
     }
+    connectingDeviceRef.current = null;
     setConn({ status: "disconnected" });
     setDeviceSnapshot(null);
+    if (wasConnecting) appendLog("Conexión cancelada.");
   }
 
   function handleChannelNameModeChange(next: ChannelNameMode) {
@@ -251,7 +275,7 @@ function App() {
     try {
       const text = await file.text();
       const profile = parseDeviceProfileJson(text);
-      setImportPending({ profile, summary: summarizeDeviceProfile(profile) });
+      setImportPending({ profile, sections: describeDeviceProfile(profile) });
     } catch (err) {
       appendLog(`Error al leer el fichero de configuración: ${translateError(err)}`);
     }
@@ -326,9 +350,9 @@ function App() {
             >
               Conectar por red
             </button>
-            {conn.status === "connected" && (
+            {(conn.status === "connected" || conn.status === "connecting") && (
               <button type="button" className="btn" onClick={handleDisconnect}>
-                Desconectar
+                {conn.status === "connecting" ? "Cancelar" : "Desconectar"}
               </button>
             )}
           </div>
@@ -592,7 +616,7 @@ function App() {
       )}
 
       {importPending && conn.status === "connected" && (
-        <ImportConfirmModal summary={importPending.summary} onConfirm={handleConfirmImport} onCancel={handleCancelImport} />
+        <ImportConfirmModal sections={importPending.sections} onConfirm={handleConfirmImport} onCancel={handleCancelImport} />
       )}
 
       <footer className="app-footer">
@@ -609,16 +633,6 @@ function App() {
       </footer>
     </div>
   );
-}
-
-const YEAR_SECONDS = 3600 * 24 * 365;
-
-function formatInterval(seconds: number): string {
-  if (seconds === 0) return "desactivado";
-  if (seconds >= YEAR_SECONDS) return `${(seconds / YEAR_SECONDS).toFixed(0)} años (prácticamente nunca)`;
-  if (seconds % 3600 === 0) return `${seconds / 3600} h`;
-  if (seconds % 60 === 0) return `${seconds / 60} min`;
-  return `${seconds} s`;
 }
 
 const ROLE_LABELS: Record<string, string> = { PRIMARY: "Primario", SECONDARY: "Secundario" };
@@ -869,44 +883,41 @@ function ConfirmApplyModal({
 }
 
 function ImportConfirmModal({
-  summary,
+  sections,
   onConfirm,
   onCancel,
 }: {
-  summary: DeviceProfileSummary;
+  sections: ProfileSummarySection[];
   onConfirm: () => void;
   onCancel: () => void;
 }) {
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true">
-      <div className="modal">
+      <div className="modal modal-wide">
         <h3>¿Aplicar esta configuración al nodo?</h3>
         <p className="hint warning">
-          Esto sobrescribe toda la configuración del nodo con la del fichero (identidad, LoRa, canales y el resto de
-          secciones que incluya el perfil) y lo reinicia al terminar.
+          Esto sobrescribe la configuración del nodo con la de este fichero y lo reinicia al terminar. Revísala antes
+          de continuar.
         </p>
-        <dl>
-          {(summary.longName || summary.shortName) && (
-            <div>
-              <dt>Nombre</dt>
-              <dd>
-                {summary.longName} {summary.shortName && `(${summary.shortName})`}
-              </dd>
-            </div>
+        <div className="device-info modal-scroll">
+          {sections.length === 0 ? (
+            <p className="hint">El fichero no trae ningún ajuste reconocible.</p>
+          ) : (
+            sections.map((section) => (
+              <div className="device-info-group" key={section.title}>
+                <h3>{section.title}</h3>
+                <dl>
+                  {section.rows.map((row) => (
+                    <div key={row.label}>
+                      <dt>{row.label}</dt>
+                      <dd>{row.value}</dd>
+                    </div>
+                  ))}
+                </dl>
+              </div>
+            ))
           )}
-          <div>
-            <dt>Canales</dt>
-            <dd>{summary.channelCount > 0 ? summary.channelCount : "ninguno"}</dd>
-          </div>
-          <div>
-            <dt>Config. incluida</dt>
-            <dd>{summary.configSections.length > 0 ? summary.configSections.join(", ") : "ninguna"}</dd>
-          </div>
-          <div>
-            <dt>Módulos incluidos</dt>
-            <dd>{summary.moduleConfigSections.length > 0 ? summary.moduleConfigSections.join(", ") : "ninguno"}</dd>
-          </div>
-        </dl>
+        </div>
         <div className="modal-actions">
           <button type="button" className="btn" onClick={onCancel}>
             Cancelar

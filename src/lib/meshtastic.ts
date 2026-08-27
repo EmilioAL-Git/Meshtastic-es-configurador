@@ -67,6 +67,17 @@ function base64UrlToBytes(base64Url: string): Uint8Array {
   return Uint8Array.from(binary, (c) => c.charCodeAt(0));
 }
 
+const YEAR_SECONDS = 3600 * 24 * 365;
+
+/** Formatea un intervalo en segundos (tal como lo maneja el firmware) en texto legible. */
+export function formatInterval(seconds: number): string {
+  if (seconds === 0) return "desactivado";
+  if (seconds >= YEAR_SECONDS) return `${(seconds / YEAR_SECONDS).toFixed(0)} años (prácticamente nunca)`;
+  if (seconds % 3600 === 0) return `${seconds / 3600} h`;
+  if (seconds % 60 === 0) return `${seconds / 60} min`;
+  return `${seconds} s`;
+}
+
 const KNOWN_ERROR_TRANSLATIONS: Array<[RegExp, string]> = [
   [/no port selected/i, "No se ha seleccionado ningún puerto."],
   [/no devices found/i, "No se ha encontrado ningún dispositivo."],
@@ -215,9 +226,14 @@ export interface ConnectResult {
   getDeviceProfileSource: () => DeviceProfileSource;
 }
 
-export async function connectSerial(onProgress?: ProgressFn, onSnapshot?: (snapshot: DeviceSnapshot) => void): Promise<ConnectResult> {
+export async function connectSerial(
+  onProgress?: ProgressFn,
+  onSnapshot?: (snapshot: DeviceSnapshot) => void,
+  onDeviceCreated?: (device: MeshDevice) => void,
+): Promise<ConnectResult> {
   const transport = await TransportWebSerial.create();
   const device = new MeshDevice(transport);
+  onDeviceCreated?.(device);
   silenceDeviceLogger(device);
   // La identidad/LoRa/canales/telemetría del nodo llegan como parte del propio
   // handshake de conexión (los mismos eventos que usa trackConnectionProgress) — hay
@@ -234,9 +250,14 @@ export async function connectSerial(onProgress?: ProgressFn, onSnapshot?: (snaps
   return { device, stopSnapshotTracking: tracking.stop, getDeviceProfileSource: tracking.getRaw };
 }
 
-export async function connectBluetooth(onProgress?: ProgressFn, onSnapshot?: (snapshot: DeviceSnapshot) => void): Promise<ConnectResult> {
+export async function connectBluetooth(
+  onProgress?: ProgressFn,
+  onSnapshot?: (snapshot: DeviceSnapshot) => void,
+  onDeviceCreated?: (device: MeshDevice) => void,
+): Promise<ConnectResult> {
   const transport = await TransportWebBluetooth.create();
   const device = new MeshDevice(transport);
+  onDeviceCreated?.(device);
   silenceDeviceLogger(device);
   const tracking = subscribeDeviceSnapshot(device, onSnapshot);
   const stopTracking = trackConnectionProgress(device, onProgress);
@@ -261,9 +282,11 @@ export async function connectNetwork(
   tls: boolean,
   onProgress?: ProgressFn,
   onSnapshot?: (snapshot: DeviceSnapshot) => void,
+  onDeviceCreated?: (device: MeshDevice) => void,
 ): Promise<ConnectResult> {
   const transport = await TransportHTTP.create(address.trim(), tls);
   const device = new MeshDevice(transport);
+  onDeviceCreated?.(device);
   silenceDeviceLogger(device);
   const tracking = subscribeDeviceSnapshot(device, onSnapshot);
   const stopTracking = trackConnectionProgress(device, onProgress);
@@ -657,31 +680,240 @@ function presentSections(labels: Record<string, string>, obj: Record<string, unk
   return Object.keys(labels).filter((key) => obj[key] !== undefined);
 }
 
-/** Resumen legible de un perfil ya interpretado, para mostrar antes de aplicarlo. */
-export interface DeviceProfileSummary {
-  longName: string | null;
-  shortName: string | null;
-  channelCount: number;
-  /** Etiquetas legibles de las secciones de Config presentes en el perfil (LoRa, red, seguridad…). */
-  configSections: string[];
-  /** Etiquetas legibles de las secciones de ModuleConfig presentes (telemetría, MQTT…). */
-  moduleConfigSections: string[];
+// Traducciones para los pocos valores de enum que se muestran a un usuario final; el
+// resto de valores (menos frecuentes) caen al nombre del enum tal cual, que ya es
+// razonablemente legible (p.ej. "ROUTER_CLIENT").
+const REGION_LABELS: Record<number, string> = {
+  1: "Estados Unidos (915 MHz)",
+  2: "Unión Europea (433 MHz)",
+  3: "Unión Europea (868 MHz)",
+  4: "China (470 MHz)",
+  5: "Japón (920 MHz)",
+  6: "ANZ - Australia/Nueva Zelanda (915 MHz)",
+  9: "Reino Unido (868 MHz)",
+};
+const DEVICE_ROLE_LABELS: Record<number, string> = {
+  0: "Cliente",
+  1: "client_mute",
+  2: "Router",
+  5: "Rastreador (tracker)",
+  6: "Sensor",
+  7: "TAK",
+  8: "Cliente oculto",
+};
+const GPS_MODE_LABELS: Record<number, string> = { 0: "desactivado", 1: "activado", 2: "no disponible en este hardware" };
+const BLUETOOTH_PAIRING_LABELS: Record<number, string> = { 0: "PIN aleatorio", 1: "PIN fijo", 2: "sin PIN" };
+
+// Módulos que no tienen una traducción propia más abajo: se listan solo por nombre, sin
+// entrar en sus campos técnicos.
+const OTHER_MODULE_LABELS: Record<string, string> = {
+  storeForward: "Store & Forward",
+  rangeTest: "Prueba de alcance",
+  audio: "Audio",
+  remoteHardware: "Hardware remoto",
+  neighborInfo: "Información de vecinos",
+  ambientLighting: "Iluminación ambiental",
+  detectionSensor: "Sensor de detección",
+  paxcounter: "Contador de personas",
+  statusmessage: "Mensaje de estado",
+  trafficManagement: "Gestión de tráfico",
+  tak: "TAK",
+};
+
+export interface ProfileSummaryRow {
+  label: string;
+  value: string;
 }
 
-export function summarizeDeviceProfile(profile: DeviceProfile): DeviceProfileSummary {
-  const channelSet = profile.channelUrl ? parseChannelUrl(profile.channelUrl) : null;
-  return {
-    longName: profile.longName ?? null,
-    shortName: profile.shortName ?? null,
-    channelCount: channelSet?.settings.length ?? 0,
-    configSections: presentSections(CONFIG_SECTION_LABELS, profile.config as unknown as Record<string, unknown>).map(
-      (key) => CONFIG_SECTION_LABELS[key],
-    ),
-    moduleConfigSections: presentSections(
-      MODULE_CONFIG_SECTION_LABELS,
-      profile.moduleConfig as unknown as Record<string, unknown>,
-    ).map((key) => MODULE_CONFIG_SECTION_LABELS[key]),
-  };
+export interface ProfileSummarySection {
+  title: string;
+  rows: ProfileSummaryRow[];
+}
+
+/**
+ * Traduce un `DeviceProfile` importado a una lista de secciones con etiquetas y valores
+ * en español, listos para mostrar a un usuario final sin que tenga que interpretar
+ * nombres de campos ni enums del protobuf. Solo incluye las secciones presentes en el
+ * perfil; nunca muestra secretos (claves, contraseñas de WiFi/MQTT).
+ */
+export function describeDeviceProfile(profile: DeviceProfile): ProfileSummarySection[] {
+  const sections: ProfileSummarySection[] = [];
+
+  if (profile.longName || profile.shortName) {
+    sections.push({
+      title: "Identidad",
+      rows: [
+        ...(profile.longName ? [{ label: "Nombre", value: profile.longName }] : []),
+        ...(profile.shortName ? [{ label: "Nombre corto", value: profile.shortName }] : []),
+      ],
+    });
+  }
+
+  if (profile.channelUrl) {
+    const channelSet = parseChannelUrl(profile.channelUrl);
+    if (channelSet.settings.length > 0) {
+      sections.push({
+        title: "Canales",
+        rows: channelSet.settings.map((s: Protobuf.Channel.ChannelSettings, i: number) => ({
+          label: i === 0 ? "Primario" : `Secundario ${i}`,
+          value: `${s.name || "(sin nombre)"} · ${(s.psk?.length ?? 0) > 0 ? "cifrado" : "sin cifrar"}`,
+        })),
+      });
+    }
+  }
+
+  const cfg = profile.config;
+
+  if (cfg?.lora) {
+    const l = cfg.lora;
+    sections.push({
+      title: "LoRa",
+      rows: [
+        { label: "Región", value: REGION_LABELS[l.region] ?? Protobuf.Config.Config_LoRaConfig_RegionCode[l.region] ?? String(l.region) },
+        {
+          label: "Modo",
+          value: l.usePreset
+            ? Protobuf.Config.Config_LoRaConfig_ModemPreset[l.modemPreset] ?? String(l.modemPreset)
+            : `Manual (ancho de banda ${l.bandwidth}kHz · factor de dispersión ${l.spreadFactor} · tasa de codificación 4/${l.codingRate})`,
+        },
+        ...(l.overrideFrequency ? [{ label: "Frecuencia fija", value: `${l.overrideFrequency.toFixed(3)} MHz` }] : []),
+        { label: "Potencia", value: l.txPower === 0 ? "Automática" : `${l.txPower} dBm` },
+        { label: "Máximo de saltos", value: String(l.hopLimit) },
+        { label: "Permite retransmitir a MQTT", value: l.configOkToMqtt ? "sí" : "no" },
+      ],
+    });
+  }
+
+  if (cfg?.device) {
+    const d = cfg.device;
+    sections.push({
+      title: "Dispositivo",
+      rows: [
+        { label: "Rol", value: DEVICE_ROLE_LABELS[d.role] ?? Protobuf.Config.Config_DeviceConfig_Role[d.role] ?? String(d.role) },
+        { label: "Anuncia su identidad cada", value: formatInterval(d.nodeInfoBroadcastSecs) },
+      ],
+    });
+  }
+
+  if (cfg?.position) {
+    const p = cfg.position;
+    sections.push({
+      title: "Posición",
+      rows: [
+        { label: "GPS", value: GPS_MODE_LABELS[p.gpsMode] ?? String(p.gpsMode) },
+        { label: "Envía su posición cada", value: formatInterval(p.positionBroadcastSecs) },
+        ...(p.fixedPosition ? [{ label: "Posición fija", value: "sí, configurada manualmente" }] : []),
+      ],
+    });
+  }
+
+  if (cfg?.power) {
+    const pw = cfg.power;
+    sections.push({
+      title: "Energía",
+      rows: [
+        { label: "Modo ahorro de energía", value: pw.isPowerSaving ? "activado" : "desactivado" },
+        ...(pw.onBatteryShutdownAfterSecs > 0
+          ? [{ label: "Se apaga sin corriente externa tras", value: formatInterval(pw.onBatteryShutdownAfterSecs) }]
+          : []),
+      ],
+    });
+  }
+
+  if (cfg?.display) {
+    const disp = cfg.display;
+    sections.push({
+      title: "Pantalla",
+      rows: [
+        { label: "Se apaga tras", value: disp.screenOnSecs === 0 ? "nunca (siempre encendida)" : formatInterval(disp.screenOnSecs) },
+        { label: "Unidades", value: disp.units === Protobuf.Config.Config_DisplayConfig_DisplayUnits.IMPERIAL ? "imperiales" : "métricas" },
+        { label: "Formato de hora", value: disp.use12hClock ? "12 horas" : "24 horas" },
+      ],
+    });
+  }
+
+  if (cfg?.bluetooth) {
+    const bt = cfg.bluetooth;
+    sections.push({
+      title: "Bluetooth",
+      rows: [
+        { label: "Activado", value: bt.enabled ? "sí" : "no" },
+        ...(bt.enabled ? [{ label: "Emparejamiento", value: BLUETOOTH_PAIRING_LABELS[bt.mode] ?? String(bt.mode) }] : []),
+      ],
+    });
+  }
+
+  if (cfg?.network) {
+    const net = cfg.network;
+    const rows: ProfileSummaryRow[] = [];
+    if (net.wifiEnabled) rows.push({ label: "WiFi", value: net.wifiSsid ? `activado, red "${net.wifiSsid}"` : "activado" });
+    if (net.ethEnabled) rows.push({ label: "Ethernet", value: "activado" });
+    if (!net.wifiEnabled && !net.ethEnabled) rows.push({ label: "Red", value: "desactivada" });
+    sections.push({ title: "Red", rows });
+  }
+
+  if (cfg?.security) {
+    const sec = cfg.security;
+    sections.push({
+      title: "Seguridad",
+      rows: [
+        { label: "Consola por cable/serie", value: sec.serialEnabled ? "activada" : "desactivada" },
+        { label: "Gestionado por un administrador", value: sec.isManaged ? "sí" : "no" },
+      ],
+    });
+  }
+
+  const mod = profile.moduleConfig;
+
+  if (mod?.telemetry) {
+    const t = mod.telemetry;
+    sections.push({
+      title: "Telemetría",
+      rows: [
+        { label: "Del dispositivo", value: t.deviceUpdateInterval === 0 ? "por defecto del firmware" : formatInterval(t.deviceUpdateInterval) },
+        { label: "Del entorno", value: t.environmentMeasurementEnabled ? formatInterval(t.environmentUpdateInterval) : "desactivada" },
+        ...(t.powerMeasurementEnabled ? [{ label: "De energía/batería", value: formatInterval(t.powerUpdateInterval) }] : []),
+      ],
+    });
+  }
+
+  if (mod?.mqtt) {
+    const m = mod.mqtt;
+    sections.push({
+      title: "MQTT",
+      rows: [
+        { label: "Activado", value: m.enabled ? "sí" : "no" },
+        ...(m.enabled && m.address ? [{ label: "Servidor", value: m.address }] : []),
+        ...(m.enabled ? [{ label: "Cifrado", value: m.encryptionEnabled ? "sí" : "no" }] : []),
+      ],
+    });
+  }
+
+  if (mod?.externalNotification) {
+    sections.push({
+      title: "Notificaciones externas",
+      rows: [{ label: "Activadas", value: mod.externalNotification.enabled ? "sí" : "no" }],
+    });
+  }
+
+  if (mod?.cannedMessage) {
+    sections.push({
+      title: "Mensajes predefinidos",
+      rows: [{ label: "Activados", value: mod.cannedMessage.enabled ? "sí" : "no" }],
+    });
+  }
+
+  const otherModules = Object.entries(OTHER_MODULE_LABELS).filter(
+    ([key]) => (mod as unknown as Record<string, unknown> | undefined)?.[key] !== undefined,
+  );
+  if (otherModules.length > 0) {
+    sections.push({
+      title: "Otros módulos incluidos en el fichero",
+      rows: otherModules.map(([, label]) => ({ label, value: "incluido" })),
+    });
+  }
+
+  return sections;
 }
 
 /**

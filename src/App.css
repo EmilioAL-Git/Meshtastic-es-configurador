@@ -263,17 +263,17 @@
   border-color: var(--accent);
 }
 
-.field .hint {
+.hint {
   font-size: 0.78rem;
   color: var(--muted);
   line-height: 1.4;
 }
 
-.field .hint a {
+.hint a {
   color: var(--accent2);
 }
 
-.field .hint.warning {
+.hint.warning {
   color: var(--danger);
 }
 
@@ -393,6 +393,13 @@
 
 .modal-wide {
   max-width: 560px;
+}
+
+.modal-scroll {
+  max-height: min(50vh, 420px);
+  overflow-y: auto;
+  padding-right: 4px;
+  margin-top: 12px;
 }
 
 .compare-table {

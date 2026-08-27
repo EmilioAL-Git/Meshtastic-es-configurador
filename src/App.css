@@ -40,8 +40,14 @@
   letter-spacing: normal;
 }
 
-.app-header .tagline {
+.app-header .header-right {
   margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.app-header .tagline {
   font-size: 12px;
   color: var(--muted);
   text-align: right;
@@ -52,6 +58,78 @@
   .app-header .tagline {
     display: block;
   }
+}
+
+/* ── Selector de idioma ── */
+.language-switcher {
+  position: relative;
+}
+
+.language-switcher-button {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  cursor: pointer;
+  padding: 6px 8px;
+  line-height: 0;
+}
+
+.language-switcher-button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.language-switcher-button svg {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+.language-switcher-code {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  line-height: 1;
+}
+
+.language-switcher-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 150px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  padding: 4px;
+  z-index: 30;
+}
+
+.language-switcher-option {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  color: var(--text);
+  font-size: 13px;
+  padding: 7px 10px;
+  cursor: pointer;
+}
+
+.language-switcher-option:hover {
+  background: var(--border);
+}
+
+.language-switcher-option.active {
+  color: var(--accent);
+  font-weight: 700;
 }
 
 /* ── Contenido ── */
@@ -355,6 +433,67 @@
 
 .link-button:hover {
   color: var(--accent);
+}
+
+/* ── Pestañas de configuración ── */
+.tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tab-button {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  padding: 8px 16px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.tab-button:hover {
+  color: var(--text);
+}
+
+.tab-button.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.simple-preset-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.simple-preset-button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  text-align: left;
+  padding: 14px 16px;
+}
+
+.simple-preset-button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow: 0 0 8px rgba(94, 234, 212, 0.15);
+}
+
+.simple-preset-label {
+  font-family: var(--mono);
+  font-size: 0.9rem;
+}
+
+.simple-preset-hint {
+  font-family: var(--sans);
+  font-size: 0.78rem;
+  color: var(--muted);
 }
 
 /* ── Modal ── */

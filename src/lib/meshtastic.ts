@@ -5,6 +5,8 @@ import { TransportWebBluetooth } from "@meshtastic/transport-web-bluetooth";
 import { TransportHTTP } from "@meshtastic/transport-http";
 import type { LoRaPresetDef } from "../presets/loraPresets";
 import type { TelemetryPresetDef } from "../presets/telemetryPresets";
+import type { MessageKey } from "../i18n/locales/es";
+import type { TFunction } from "../i18n";
 
 const { ConfigSchema, Config_LoRaConfigSchema } = Protobuf.Config;
 const { ModuleConfigSchema, ModuleConfig_TelemetryConfigSchema } = Protobuf.ModuleConfig;
@@ -70,31 +72,31 @@ function base64UrlToBytes(base64Url: string): Uint8Array {
 const YEAR_SECONDS = 3600 * 24 * 365;
 
 /** Formatea un intervalo en segundos (tal como lo maneja el firmware) en texto legible. */
-export function formatInterval(seconds: number): string {
-  if (seconds === 0) return "desactivado";
-  if (seconds >= YEAR_SECONDS) return `${(seconds / YEAR_SECONDS).toFixed(0)} años (prácticamente nunca)`;
-  if (seconds % 3600 === 0) return `${seconds / 3600} h`;
-  if (seconds % 60 === 0) return `${seconds / 60} min`;
-  return `${seconds} s`;
+export function formatInterval(seconds: number, t: TFunction): string {
+  if (seconds === 0) return t("interval.disabled");
+  if (seconds >= YEAR_SECONDS) return t("interval.years", { n: (seconds / YEAR_SECONDS).toFixed(0) });
+  if (seconds % 3600 === 0) return t("interval.hours", { n: seconds / 3600 });
+  if (seconds % 60 === 0) return t("interval.minutes", { n: seconds / 60 });
+  return t("interval.seconds", { n: seconds });
 }
 
-const KNOWN_ERROR_TRANSLATIONS: Array<[RegExp, string]> = [
-  [/no port selected/i, "No se ha seleccionado ningún puerto."],
-  [/no devices found/i, "No se ha encontrado ningún dispositivo."],
-  [/user cancelled|user gesture/i, "Operación cancelada por el usuario."],
-  [/security error|permission/i, "Permiso denegado por el navegador."],
-  [/network error/i, "Error de conexión con el dispositivo."],
-  [/gatt operation failed/i, "Fallo de comunicación Bluetooth con el dispositivo (GATT)."],
-  [/failed to open/i, "No se ha podido abrir el puerto."],
-  [/tiempo de espera agotado/i, "Tiempo de espera agotado esperando la configuración inicial del dispositivo."],
-  [/failed to fetch/i, "No se ha podido contactar con el nodo por red. Comprueba la IP/host y que esté en la misma red."],
+const KNOWN_ERROR_TRANSLATIONS: Array<[RegExp, MessageKey]> = [
+  [/no port selected/i, "error.noPortSelected"],
+  [/no devices found/i, "error.noDevicesFound"],
+  [/user cancelled|user gesture/i, "error.cancelledByUser"],
+  [/security error|permission/i, "error.permissionDenied"],
+  [/network error/i, "error.networkError"],
+  [/gatt operation failed/i, "error.gattFailed"],
+  [/failed to open/i, "error.failedToOpen"],
+  [/^CONFIG_TIMEOUT$/, "error.configTimeout"],
+  [/failed to fetch/i, "error.failedToFetch"],
 ];
 
-/** Traduce al español los mensajes de error habituales de Web Serial/Bluetooth y del SDK; si no reconoce el mensaje, lo deja tal cual. */
-export function translateError(err: unknown): string {
+/** Traduce los mensajes de error habituales de Web Serial/Bluetooth y del SDK al idioma activo; si no reconoce el mensaje, lo deja tal cual. */
+export function translateError(err: unknown, t: TFunction): string {
   const message = err instanceof Error ? err.message : String(err);
   const match = KNOWN_ERROR_TRANSLATIONS.find(([pattern]) => pattern.test(message));
-  return match ? match[1] : message;
+  return match ? t(match[1]) : message;
 }
 
 export function isWebSerialSupported(): boolean {
@@ -144,39 +146,39 @@ const CONNECT_PERCENT = {
   configured: 100,
 };
 
-function describeDeviceStatus(status: Types.DeviceStatusEnum): { message: string; percent: number } | null {
+function describeDeviceStatus(status: Types.DeviceStatusEnum, t: TFunction): { message: string; percent: number } | null {
   switch (status) {
     case Types.DeviceStatusEnum.DeviceConnecting:
-      return { message: "Abriendo la conexión con el nodo…", percent: CONNECT_PERCENT.connecting };
+      return { message: t("progress.openingConnection"), percent: CONNECT_PERCENT.connecting };
     case Types.DeviceStatusEnum.DeviceReconnecting:
-      return { message: "Reconectando con el nodo…", percent: CONNECT_PERCENT.connecting };
+      return { message: t("progress.reconnecting"), percent: CONNECT_PERCENT.connecting };
     case Types.DeviceStatusEnum.DeviceConnected:
-      return { message: "Conectado. Solicitando configuración del nodo…", percent: CONNECT_PERCENT.connected };
+      return { message: t("progress.connectedRequesting"), percent: CONNECT_PERCENT.connected };
     case Types.DeviceStatusEnum.DeviceConfiguring:
       return {
-        message: "Descargando configuración y nodos conocidos de la malla…",
+        message: t("progress.downloadingConfig"),
         percent: CONNECT_PERCENT.configuringStart,
       };
     case Types.DeviceStatusEnum.DeviceConfigured:
-      return { message: "Configuración del nodo recibida.", percent: CONNECT_PERCENT.configured };
+      return { message: t("progress.configReceived"), percent: CONNECT_PERCENT.configured };
     default:
       return null;
   }
 }
 
 /** Traduce los eventos internos del SDK durante el handshake de conexión a mensajes legibles y un % estimado. */
-function trackConnectionProgress(device: MeshDevice, onProgress?: ProgressFn): () => void {
+function trackConnectionProgress(device: MeshDevice, t: TFunction, onProgress?: ProgressFn): () => void {
   if (!onProgress) return () => {};
 
   let nodeCount = 0;
   let channelCount = 0;
   const unsubs: Array<() => void> = [
     device.events.onDeviceStatus.subscribe((status) => {
-      const step = describeDeviceStatus(status);
+      const step = describeDeviceStatus(status, t);
       if (step) onProgress(step.message, { percent: step.percent });
     }),
     device.events.onMyNodeInfo.subscribe((info) => {
-      onProgress(`Nodo identificado (núm. ${info.myNodeNum}).`, { percent: CONNECT_PERCENT.myNodeInfo });
+      onProgress(t("progress.nodeIdentified", { num: info.myNodeNum }), { percent: CONNECT_PERCENT.myNodeInfo });
     }),
     device.events.onNodeInfoPacket.subscribe(() => {
       nodeCount += 1;
@@ -184,19 +186,25 @@ function trackConnectionProgress(device: MeshDevice, onProgress?: ProgressFn): (
       // no sabemos cuántos nodos quedan por llegar.
       const span = CONNECT_PERCENT.configuringEnd - CONNECT_PERCENT.myNodeInfo;
       const percent = CONNECT_PERCENT.myNodeInfo + span * (1 - 1 / (1 + nodeCount / 8));
-      onProgress(`Recibiendo nodos conocidos de la malla… (${nodeCount})`, {
+      onProgress(t("progress.receivingNodes", { count: nodeCount }), {
         replace: nodeCount > 1,
         percent,
       });
     }),
     device.events.onChannelPacket.subscribe((channel) => {
       channelCount += 1;
-      onProgress(`Canal recibido: ${channel.settings?.name || "(sin nombre)"} (índice ${channel.index}).`, {
-        percent: Math.min(
-          CONNECT_PERCENT.configuringEnd,
-          CONNECT_PERCENT.myNodeInfo + channelCount * CONNECT_PERCENT.channelStep,
-        ),
-      });
+      onProgress(
+        t("progress.channelReceived", {
+          name: channel.settings?.name || t("confirmApply.unnamed"),
+          index: channel.index,
+        }),
+        {
+          percent: Math.min(
+            CONNECT_PERCENT.configuringEnd,
+            CONNECT_PERCENT.myNodeInfo + channelCount * CONNECT_PERCENT.channelStep,
+          ),
+        },
+      );
     }),
   ];
   return () => unsubs.forEach((unsub) => unsub());
@@ -227,6 +235,7 @@ export interface ConnectResult {
 }
 
 export async function connectSerial(
+  t: TFunction,
   onProgress?: ProgressFn,
   onSnapshot?: (snapshot: DeviceSnapshot) => void,
   onDeviceCreated?: (device: MeshDevice) => void,
@@ -239,8 +248,8 @@ export async function connectSerial(
   // handshake de conexión (los mismos eventos que usa trackConnectionProgress) — hay
   // que escucharlos desde YA, no después de que `configured` resuelva, porque para
   // entonces ya han pasado y no se repiten.
-  const tracking = subscribeDeviceSnapshot(device, onSnapshot);
-  const stopTracking = trackConnectionProgress(device, onProgress);
+  const tracking = subscribeDeviceSnapshot(device, t, onSnapshot);
+  const stopTracking = trackConnectionProgress(device, t, onProgress);
   try {
     requestConfigure(device);
     await waitUntilConfigured(device);
@@ -251,6 +260,7 @@ export async function connectSerial(
 }
 
 export async function connectBluetooth(
+  t: TFunction,
   onProgress?: ProgressFn,
   onSnapshot?: (snapshot: DeviceSnapshot) => void,
   onDeviceCreated?: (device: MeshDevice) => void,
@@ -259,8 +269,8 @@ export async function connectBluetooth(
   const device = new MeshDevice(transport);
   onDeviceCreated?.(device);
   silenceDeviceLogger(device);
-  const tracking = subscribeDeviceSnapshot(device, onSnapshot);
-  const stopTracking = trackConnectionProgress(device, onProgress);
+  const tracking = subscribeDeviceSnapshot(device, t, onSnapshot);
+  const stopTracking = trackConnectionProgress(device, t, onProgress);
   try {
     requestConfigure(device);
     await waitUntilConfigured(device);
@@ -280,6 +290,7 @@ export async function connectBluetooth(
 export async function connectNetwork(
   address: string,
   tls: boolean,
+  t: TFunction,
   onProgress?: ProgressFn,
   onSnapshot?: (snapshot: DeviceSnapshot) => void,
   onDeviceCreated?: (device: MeshDevice) => void,
@@ -288,8 +299,8 @@ export async function connectNetwork(
   const device = new MeshDevice(transport);
   onDeviceCreated?.(device);
   silenceDeviceLogger(device);
-  const tracking = subscribeDeviceSnapshot(device, onSnapshot);
-  const stopTracking = trackConnectionProgress(device, onProgress);
+  const tracking = subscribeDeviceSnapshot(device, t, onSnapshot);
+  const stopTracking = trackConnectionProgress(device, t, onProgress);
   try {
     requestConfigure(device);
     await waitUntilConfigured(device);
@@ -304,7 +315,9 @@ function waitUntilConfigured(device: MeshDevice, timeoutMs = 20000): Promise<voi
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       unsubscribe();
-      reject(new Error("Tiempo de espera agotado esperando la configuración inicial del dispositivo"));
+      // Marcador estable (no localizado) para que translateError lo reconozca en
+      // cualquier idioma vía KNOWN_ERROR_TRANSLATIONS.
+      reject(new Error("CONFIG_TIMEOUT"));
     }, timeoutMs);
 
     const unsubscribe = device.events.onDeviceStatus.subscribe((status) => {
@@ -394,6 +407,7 @@ export interface DeviceProfileSource {
  */
 export function subscribeDeviceSnapshot(
   device: MeshDevice,
+  t: TFunction,
   onUpdate?: (snapshot: DeviceSnapshot) => void,
 ): { stop: () => void; getRaw: () => DeviceProfileSource } {
   let snapshot: DeviceSnapshot = { ...EMPTY_SNAPSHOT, channels: [] };
@@ -480,7 +494,7 @@ export function subscribeDeviceSnapshot(
       if (channel.role === Channel_Role.DISABLED) return;
       const entry: DeviceSnapshotChannel = {
         index: channel.index,
-        name: channel.settings?.name || "(sin nombre)",
+        name: channel.settings?.name || t("confirmApply.unnamed"),
         role: Channel_Role[channel.role] ?? String(channel.role),
         encrypted: (channel.settings?.psk?.length ?? 0) > 0,
       };
@@ -518,10 +532,10 @@ export interface ApplyPresetOptions {
 }
 
 /** Aplica LoRa + canal primario + intervalos de telemetría a un nodo ya conectado, y reinicia. */
-export async function applyPreset(device: MeshDevice, opts: ApplyPresetOptions): Promise<void> {
+export async function applyPreset(device: MeshDevice, t: TFunction, opts: ApplyPresetOptions): Promise<void> {
   const { region, onProgress } = opts;
 
-  onProgress?.("Enviando configuración LoRa…", { percent: 5 });
+  onProgress?.(t("progress.sendingLora"), { percent: 5 });
   const loraConfig = create(Config_LoRaConfigSchema, {
     usePreset: opts.lora.values.usePreset,
     modemPreset: opts.lora.values.modemPreset,
@@ -537,7 +551,7 @@ export async function applyPreset(device: MeshDevice, opts: ApplyPresetOptions):
     create(ConfigSchema, { payloadVariant: { case: "lora", value: loraConfig } }),
   );
 
-  onProgress?.("Enviando canal primario…", { percent: 30 });
+  onProgress?.(t("progress.sendingPrimaryChannel"), { percent: 30 });
   const channelSettings = create(ChannelSettingsSchema, {
     name: opts.channel.name,
     psk: opts.channel.psk,
@@ -547,7 +561,7 @@ export async function applyPreset(device: MeshDevice, opts: ApplyPresetOptions):
   );
 
   if (opts.secondaryChannel) {
-    onProgress?.("Enviando canal secundario…", { percent: 45 });
+    onProgress?.(t("progress.sendingSecondaryChannel"), { percent: 45 });
     const secondarySettings = create(ChannelSettingsSchema, {
       name: opts.secondaryChannel.name,
       psk: opts.secondaryChannel.psk,
@@ -557,7 +571,7 @@ export async function applyPreset(device: MeshDevice, opts: ApplyPresetOptions):
     );
   }
 
-  onProgress?.("Enviando intervalos de telemetría…", { percent: 55 });
+  onProgress?.(t("progress.sendingTelemetry"), { percent: 55 });
   const telemetryConfig = create(ModuleConfig_TelemetryConfigSchema, {
     deviceUpdateInterval: opts.telemetry.values.deviceUpdateInterval,
     environmentUpdateInterval: opts.telemetry.values.environmentUpdateInterval,
@@ -567,9 +581,9 @@ export async function applyPreset(device: MeshDevice, opts: ApplyPresetOptions):
     create(ModuleConfigSchema, { payloadVariant: { case: "telemetry", value: telemetryConfig } }),
   );
 
-  onProgress?.("Reiniciando el nodo para aplicar los cambios…", { percent: 80 });
+  onProgress?.(t("progress.rebooting"), { percent: 80 });
   await device.reboot(2);
-  onProgress?.("Configuración aplicada. El nodo se está reiniciando.", { percent: 100 });
+  onProgress?.(t("progress.applied"), { percent: 100 });
 }
 
 const CHANNEL_URL_PREFIX = "https://meshtastic.org/e/#";
@@ -646,36 +660,36 @@ export function parseDeviceProfileJson(jsonText: string): DeviceProfile {
 }
 
 // Nombre de cada sección para los mensajes de progreso al aplicar un perfil importado.
-const CONFIG_SECTION_LABELS: Record<string, string> = {
-  device: "dispositivo",
-  position: "posición",
-  power: "energía",
-  network: "red",
-  display: "pantalla",
-  lora: "LoRa",
-  bluetooth: "bluetooth",
-  security: "seguridad",
+const CONFIG_SECTION_LABELS: Record<string, MessageKey> = {
+  device: "configSection.device",
+  position: "configSection.position",
+  power: "configSection.power",
+  network: "configSection.network",
+  display: "configSection.display",
+  lora: "configSection.lora",
+  bluetooth: "configSection.bluetooth",
+  security: "configSection.security",
 };
-const MODULE_CONFIG_SECTION_LABELS: Record<string, string> = {
-  mqtt: "MQTT",
-  serial: "módulo serie",
-  externalNotification: "notificaciones externas",
-  storeForward: "store & forward",
-  rangeTest: "prueba de alcance",
-  telemetry: "telemetría",
-  cannedMessage: "mensajes predefinidos",
-  audio: "audio",
-  remoteHardware: "hardware remoto",
-  neighborInfo: "info. de vecinos",
-  ambientLighting: "iluminación ambiental",
-  detectionSensor: "sensor de detección",
-  paxcounter: "contador de personas",
-  statusmessage: "mensaje de estado",
-  trafficManagement: "gestión de tráfico",
-  tak: "TAK",
+const MODULE_CONFIG_SECTION_LABELS: Record<string, MessageKey> = {
+  mqtt: "moduleSection.mqtt",
+  serial: "moduleSection.serial",
+  externalNotification: "moduleSection.externalNotification",
+  storeForward: "moduleSection.storeForward",
+  rangeTest: "moduleSection.rangeTest",
+  telemetry: "moduleSection.telemetry",
+  cannedMessage: "moduleSection.cannedMessage",
+  audio: "moduleSection.audio",
+  remoteHardware: "moduleSection.remoteHardware",
+  neighborInfo: "moduleSection.neighborInfo",
+  ambientLighting: "moduleSection.ambientLighting",
+  detectionSensor: "moduleSection.detectionSensor",
+  paxcounter: "moduleSection.paxcounter",
+  statusmessage: "moduleSection.statusmessage",
+  trafficManagement: "moduleSection.trafficManagement",
+  tak: "moduleSection.tak",
 };
 
-function presentSections(labels: Record<string, string>, obj: Record<string, unknown> | undefined): string[] {
+function presentSections(labels: Record<string, MessageKey>, obj: Record<string, unknown> | undefined): string[] {
   if (!obj) return [];
   return Object.keys(labels).filter((key) => obj[key] !== undefined);
 }
@@ -683,41 +697,41 @@ function presentSections(labels: Record<string, string>, obj: Record<string, unk
 // Traducciones para los pocos valores de enum que se muestran a un usuario final; el
 // resto de valores (menos frecuentes) caen al nombre del enum tal cual, que ya es
 // razonablemente legible (p.ej. "ROUTER_CLIENT").
-const REGION_LABELS: Record<number, string> = {
-  1: "Estados Unidos (915 MHz)",
-  2: "Unión Europea (433 MHz)",
-  3: "Unión Europea (868 MHz)",
-  4: "China (470 MHz)",
-  5: "Japón (920 MHz)",
-  6: "ANZ - Australia/Nueva Zelanda (915 MHz)",
-  9: "Reino Unido (868 MHz)",
+const REGION_LABELS: Record<number, MessageKey> = {
+  1: "region.us915",
+  2: "region.eu433",
+  3: "region.eu868",
+  4: "region.cn",
+  5: "region.jp",
+  6: "region.anz",
+  9: "region.uk",
 };
-const DEVICE_ROLE_LABELS: Record<number, string> = {
-  0: "Cliente",
-  1: "client_mute",
-  2: "Router",
-  5: "Rastreador (tracker)",
-  6: "Sensor",
-  7: "TAK",
-  8: "Cliente oculto",
+const DEVICE_ROLE_LABELS: Record<number, MessageKey> = {
+  0: "deviceRole.client",
+  1: "deviceRole.clientMute",
+  2: "deviceRole.router",
+  5: "deviceRole.tracker",
+  6: "deviceRole.sensor",
+  7: "deviceRole.tak",
+  8: "deviceRole.clientHidden",
 };
-const GPS_MODE_LABELS: Record<number, string> = { 0: "desactivado", 1: "activado", 2: "no disponible en este hardware" };
-const BLUETOOTH_PAIRING_LABELS: Record<number, string> = { 0: "PIN aleatorio", 1: "PIN fijo", 2: "sin PIN" };
+const GPS_MODE_LABELS: Record<number, MessageKey> = { 0: "gpsMode.disabled", 1: "gpsMode.enabled", 2: "gpsMode.notAvailable" };
+const BLUETOOTH_PAIRING_LABELS: Record<number, MessageKey> = { 0: "bluetoothPairing.randomPin", 1: "bluetoothPairing.fixedPin", 2: "bluetoothPairing.noPin" };
 
 // Módulos que no tienen una traducción propia más abajo: se listan solo por nombre, sin
 // entrar en sus campos técnicos.
-const OTHER_MODULE_LABELS: Record<string, string> = {
-  storeForward: "Store & Forward",
-  rangeTest: "Prueba de alcance",
-  audio: "Audio",
-  remoteHardware: "Hardware remoto",
-  neighborInfo: "Información de vecinos",
-  ambientLighting: "Iluminación ambiental",
-  detectionSensor: "Sensor de detección",
-  paxcounter: "Contador de personas",
-  statusmessage: "Mensaje de estado",
-  trafficManagement: "Gestión de tráfico",
-  tak: "TAK",
+const OTHER_MODULE_LABELS: Record<string, MessageKey> = {
+  storeForward: "otherModule.storeForward",
+  rangeTest: "otherModule.rangeTest",
+  audio: "otherModule.audio",
+  remoteHardware: "otherModule.remoteHardware",
+  neighborInfo: "otherModule.neighborInfo",
+  ambientLighting: "otherModule.ambientLighting",
+  detectionSensor: "otherModule.detectionSensor",
+  paxcounter: "otherModule.paxcounter",
+  statusmessage: "otherModule.statusmessage",
+  trafficManagement: "otherModule.trafficManagement",
+  tak: "otherModule.tak",
 };
 
 export interface ProfileSummaryRow {
@@ -736,15 +750,16 @@ export interface ProfileSummarySection {
  * nombres de campos ni enums del protobuf. Solo incluye las secciones presentes en el
  * perfil; nunca muestra secretos (claves, contraseñas de WiFi/MQTT).
  */
-export function describeDeviceProfile(profile: DeviceProfile): ProfileSummarySection[] {
+export function describeDeviceProfile(profile: DeviceProfile, t: TFunction): ProfileSummarySection[] {
   const sections: ProfileSummarySection[] = [];
+  const yesNo = (v: boolean) => (v ? t("profile.yes") : t("profile.no"));
 
   if (profile.longName || profile.shortName) {
     sections.push({
-      title: "Identidad",
+      title: t("profile.identity.title"),
       rows: [
-        ...(profile.longName ? [{ label: "Nombre", value: profile.longName }] : []),
-        ...(profile.shortName ? [{ label: "Nombre corto", value: profile.shortName }] : []),
+        ...(profile.longName ? [{ label: t("profile.identity.name"), value: profile.longName }] : []),
+        ...(profile.shortName ? [{ label: t("profile.identity.shortName"), value: profile.shortName }] : []),
       ],
     });
   }
@@ -753,10 +768,10 @@ export function describeDeviceProfile(profile: DeviceProfile): ProfileSummarySec
     const channelSet = parseChannelUrl(profile.channelUrl);
     if (channelSet.settings.length > 0) {
       sections.push({
-        title: "Canales",
+        title: t("profile.channels.title"),
         rows: channelSet.settings.map((s: Protobuf.Channel.ChannelSettings, i: number) => ({
-          label: i === 0 ? "Primario" : `Secundario ${i}`,
-          value: `${s.name || "(sin nombre)"} · ${(s.psk?.length ?? 0) > 0 ? "cifrado" : "sin cifrar"}`,
+          label: i === 0 ? t("profile.channels.primary") : t("profile.channels.secondary", { n: i }),
+          value: `${s.name || t("confirmApply.unnamed")} · ${(s.psk?.length ?? 0) > 0 ? t("profile.channels.encrypted") : t("profile.channels.unencrypted")}`,
         })),
       });
     }
@@ -767,19 +782,19 @@ export function describeDeviceProfile(profile: DeviceProfile): ProfileSummarySec
   if (cfg?.lora) {
     const l = cfg.lora;
     sections.push({
-      title: "LoRa",
+      title: t("profile.lora.title"),
       rows: [
-        { label: "Región", value: REGION_LABELS[l.region] ?? Protobuf.Config.Config_LoRaConfig_RegionCode[l.region] ?? String(l.region) },
+        { label: t("profile.lora.region"), value: (l.region in REGION_LABELS ? t(REGION_LABELS[l.region]) : Protobuf.Config.Config_LoRaConfig_RegionCode[l.region]) ?? String(l.region) },
         {
-          label: "Modo",
+          label: t("profile.lora.mode"),
           value: l.usePreset
             ? Protobuf.Config.Config_LoRaConfig_ModemPreset[l.modemPreset] ?? String(l.modemPreset)
-            : `Manual (ancho de banda ${l.bandwidth}kHz · factor de dispersión ${l.spreadFactor} · tasa de codificación 4/${l.codingRate})`,
+            : t("profile.lora.manual", { bw: l.bandwidth, sf: l.spreadFactor, cr: l.codingRate }),
         },
-        ...(l.overrideFrequency ? [{ label: "Frecuencia fija", value: `${l.overrideFrequency.toFixed(3)} MHz` }] : []),
-        { label: "Potencia", value: l.txPower === 0 ? "Automática" : `${l.txPower} dBm` },
-        { label: "Máximo de saltos", value: String(l.hopLimit) },
-        { label: "Permite retransmitir a MQTT", value: l.configOkToMqtt ? "sí" : "no" },
+        ...(l.overrideFrequency ? [{ label: t("profile.lora.fixedFreq"), value: `${l.overrideFrequency.toFixed(3)} MHz` }] : []),
+        { label: t("profile.lora.power"), value: l.txPower === 0 ? t("profile.lora.powerAuto") : `${l.txPower} dBm` },
+        { label: t("profile.lora.hopLimit"), value: String(l.hopLimit) },
+        { label: t("profile.lora.mqttUplink"), value: yesNo(l.configOkToMqtt) },
       ],
     });
   }
@@ -787,10 +802,10 @@ export function describeDeviceProfile(profile: DeviceProfile): ProfileSummarySec
   if (cfg?.device) {
     const d = cfg.device;
     sections.push({
-      title: "Dispositivo",
+      title: t("profile.device.title"),
       rows: [
-        { label: "Rol", value: DEVICE_ROLE_LABELS[d.role] ?? Protobuf.Config.Config_DeviceConfig_Role[d.role] ?? String(d.role) },
-        { label: "Anuncia su identidad cada", value: formatInterval(d.nodeInfoBroadcastSecs) },
+        { label: t("profile.device.role"), value: (d.role in DEVICE_ROLE_LABELS ? t(DEVICE_ROLE_LABELS[d.role]) : Protobuf.Config.Config_DeviceConfig_Role[d.role]) ?? String(d.role) },
+        { label: t("profile.device.broadcastInterval"), value: formatInterval(d.nodeInfoBroadcastSecs, t) },
       ],
     });
   }
@@ -798,11 +813,11 @@ export function describeDeviceProfile(profile: DeviceProfile): ProfileSummarySec
   if (cfg?.position) {
     const p = cfg.position;
     sections.push({
-      title: "Posición",
+      title: t("profile.position.title"),
       rows: [
-        { label: "GPS", value: GPS_MODE_LABELS[p.gpsMode] ?? String(p.gpsMode) },
-        { label: "Envía su posición cada", value: formatInterval(p.positionBroadcastSecs) },
-        ...(p.fixedPosition ? [{ label: "Posición fija", value: "sí, configurada manualmente" }] : []),
+        { label: t("profile.position.gps"), value: p.gpsMode in GPS_MODE_LABELS ? t(GPS_MODE_LABELS[p.gpsMode]) : String(p.gpsMode) },
+        { label: t("profile.position.broadcastInterval"), value: formatInterval(p.positionBroadcastSecs, t) },
+        ...(p.fixedPosition ? [{ label: t("profile.position.fixed"), value: t("profile.position.fixedValue") }] : []),
       ],
     });
   }
@@ -810,11 +825,11 @@ export function describeDeviceProfile(profile: DeviceProfile): ProfileSummarySec
   if (cfg?.power) {
     const pw = cfg.power;
     sections.push({
-      title: "Energía",
+      title: t("profile.power.title"),
       rows: [
-        { label: "Modo ahorro de energía", value: pw.isPowerSaving ? "activado" : "desactivado" },
+        { label: t("profile.power.saving"), value: pw.isPowerSaving ? t("profile.activated") : t("profile.deactivated") },
         ...(pw.onBatteryShutdownAfterSecs > 0
-          ? [{ label: "Se apaga sin corriente externa tras", value: formatInterval(pw.onBatteryShutdownAfterSecs) }]
+          ? [{ label: t("profile.power.shutdownAfter"), value: formatInterval(pw.onBatteryShutdownAfterSecs, t) }]
           : []),
       ],
     });
@@ -823,11 +838,11 @@ export function describeDeviceProfile(profile: DeviceProfile): ProfileSummarySec
   if (cfg?.display) {
     const disp = cfg.display;
     sections.push({
-      title: "Pantalla",
+      title: t("profile.display.title"),
       rows: [
-        { label: "Se apaga tras", value: disp.screenOnSecs === 0 ? "nunca (siempre encendida)" : formatInterval(disp.screenOnSecs) },
-        { label: "Unidades", value: disp.units === Protobuf.Config.Config_DisplayConfig_DisplayUnits.IMPERIAL ? "imperiales" : "métricas" },
-        { label: "Formato de hora", value: disp.use12hClock ? "12 horas" : "24 horas" },
+        { label: t("profile.display.offAfter"), value: disp.screenOnSecs === 0 ? t("profile.display.alwaysOn") : formatInterval(disp.screenOnSecs, t) },
+        { label: t("profile.display.units"), value: disp.units === Protobuf.Config.Config_DisplayConfig_DisplayUnits.IMPERIAL ? t("profile.display.imperial") : t("profile.display.metric") },
+        { label: t("profile.display.clockFormat"), value: disp.use12hClock ? t("profile.display.clock12") : t("profile.display.clock24") },
       ],
     });
   }
@@ -835,10 +850,10 @@ export function describeDeviceProfile(profile: DeviceProfile): ProfileSummarySec
   if (cfg?.bluetooth) {
     const bt = cfg.bluetooth;
     sections.push({
-      title: "Bluetooth",
+      title: t("profile.bluetooth.title"),
       rows: [
-        { label: "Activado", value: bt.enabled ? "sí" : "no" },
-        ...(bt.enabled ? [{ label: "Emparejamiento", value: BLUETOOTH_PAIRING_LABELS[bt.mode] ?? String(bt.mode) }] : []),
+        { label: t("profile.bluetooth.enabled"), value: yesNo(bt.enabled) },
+        ...(bt.enabled ? [{ label: t("profile.bluetooth.pairing"), value: bt.mode in BLUETOOTH_PAIRING_LABELS ? t(BLUETOOTH_PAIRING_LABELS[bt.mode]) : String(bt.mode) }] : []),
       ],
     });
   }
@@ -846,19 +861,19 @@ export function describeDeviceProfile(profile: DeviceProfile): ProfileSummarySec
   if (cfg?.network) {
     const net = cfg.network;
     const rows: ProfileSummaryRow[] = [];
-    if (net.wifiEnabled) rows.push({ label: "WiFi", value: net.wifiSsid ? `activado, red "${net.wifiSsid}"` : "activado" });
-    if (net.ethEnabled) rows.push({ label: "Ethernet", value: "activado" });
-    if (!net.wifiEnabled && !net.ethEnabled) rows.push({ label: "Red", value: "desactivada" });
-    sections.push({ title: "Red", rows });
+    if (net.wifiEnabled) rows.push({ label: t("profile.network.wifi"), value: net.wifiSsid ? t("profile.network.wifiOnNamed", { ssid: net.wifiSsid }) : t("profile.network.wifiOn") });
+    if (net.ethEnabled) rows.push({ label: t("profile.network.ethernet"), value: t("profile.network.ethernetOn") });
+    if (!net.wifiEnabled && !net.ethEnabled) rows.push({ label: t("profile.network.title"), value: t("profile.network.disabled") });
+    sections.push({ title: t("profile.network.title"), rows });
   }
 
   if (cfg?.security) {
     const sec = cfg.security;
     sections.push({
-      title: "Seguridad",
+      title: t("profile.security.title"),
       rows: [
-        { label: "Consola por cable/serie", value: sec.serialEnabled ? "activada" : "desactivada" },
-        { label: "Gestionado por un administrador", value: sec.isManaged ? "sí" : "no" },
+        { label: t("profile.security.serialConsole"), value: sec.serialEnabled ? t("profile.activated") : t("profile.deactivated") },
+        { label: t("profile.security.managed"), value: yesNo(sec.isManaged) },
       ],
     });
   }
@@ -866,13 +881,13 @@ export function describeDeviceProfile(profile: DeviceProfile): ProfileSummarySec
   const mod = profile.moduleConfig;
 
   if (mod?.telemetry) {
-    const t = mod.telemetry;
+    const tel = mod.telemetry;
     sections.push({
-      title: "Telemetría",
+      title: t("profile.telemetry.title"),
       rows: [
-        { label: "Del dispositivo", value: t.deviceUpdateInterval === 0 ? "por defecto del firmware" : formatInterval(t.deviceUpdateInterval) },
-        { label: "Del entorno", value: t.environmentMeasurementEnabled ? formatInterval(t.environmentUpdateInterval) : "desactivada" },
-        ...(t.powerMeasurementEnabled ? [{ label: "De energía/batería", value: formatInterval(t.powerUpdateInterval) }] : []),
+        { label: t("profile.telemetry.device"), value: tel.deviceUpdateInterval === 0 ? t("profile.telemetry.deviceDefault") : formatInterval(tel.deviceUpdateInterval, t) },
+        { label: t("profile.telemetry.environment"), value: tel.environmentMeasurementEnabled ? formatInterval(tel.environmentUpdateInterval, t) : t("profile.deactivated") },
+        ...(tel.powerMeasurementEnabled ? [{ label: t("profile.telemetry.power"), value: formatInterval(tel.powerUpdateInterval, t) }] : []),
       ],
     });
   }
@@ -880,26 +895,26 @@ export function describeDeviceProfile(profile: DeviceProfile): ProfileSummarySec
   if (mod?.mqtt) {
     const m = mod.mqtt;
     sections.push({
-      title: "MQTT",
+      title: t("profile.mqtt.title"),
       rows: [
-        { label: "Activado", value: m.enabled ? "sí" : "no" },
-        ...(m.enabled && m.address ? [{ label: "Servidor", value: m.address }] : []),
-        ...(m.enabled ? [{ label: "Cifrado", value: m.encryptionEnabled ? "sí" : "no" }] : []),
+        { label: t("profile.mqtt.enabled"), value: yesNo(m.enabled) },
+        ...(m.enabled && m.address ? [{ label: t("profile.mqtt.server"), value: m.address }] : []),
+        ...(m.enabled ? [{ label: t("profile.mqtt.encryption"), value: yesNo(m.encryptionEnabled) }] : []),
       ],
     });
   }
 
   if (mod?.externalNotification) {
     sections.push({
-      title: "Notificaciones externas",
-      rows: [{ label: "Activadas", value: mod.externalNotification.enabled ? "sí" : "no" }],
+      title: t("profile.externalNotification.title"),
+      rows: [{ label: t("profile.externalNotification.enabled"), value: yesNo(mod.externalNotification.enabled) }],
     });
   }
 
   if (mod?.cannedMessage) {
     sections.push({
-      title: "Mensajes predefinidos",
-      rows: [{ label: "Activados", value: mod.cannedMessage.enabled ? "sí" : "no" }],
+      title: t("profile.cannedMessage.title"),
+      rows: [{ label: t("profile.cannedMessage.enabled"), value: yesNo(mod.cannedMessage.enabled) }],
     });
   }
 
@@ -908,8 +923,8 @@ export function describeDeviceProfile(profile: DeviceProfile): ProfileSummarySec
   );
   if (otherModules.length > 0) {
     sections.push({
-      title: "Otros módulos incluidos en el fichero",
-      rows: otherModules.map(([, label]) => ({ label, value: "incluido" })),
+      title: t("profile.otherModules.title"),
+      rows: otherModules.map(([, key]) => ({ label: t(key), value: t("otherModule.included") })),
     });
   }
 
@@ -922,9 +937,9 @@ export function describeDeviceProfile(profile: DeviceProfile): ProfileSummarySec
  * de `channelUrl`, primero PRIMARY y el resto SECONDARY). Reinicia el nodo al terminar,
  * igual que `applyPreset`.
  */
-export async function applyDeviceProfile(device: MeshDevice, profile: DeviceProfile, onProgress?: ProgressFn): Promise<void> {
+export async function applyDeviceProfile(device: MeshDevice, profile: DeviceProfile, t: TFunction, onProgress?: ProgressFn): Promise<void> {
   if (profile.longName || profile.shortName) {
-    onProgress?.("Enviando nombre del nodo…", { percent: 5 });
+    onProgress?.(t("progress.sendingNodeName"), { percent: 5 });
     await device.setOwner(
       create(UserSchema, { longName: profile.longName ?? "", shortName: profile.shortName ?? "" }),
     );
@@ -932,7 +947,7 @@ export async function applyDeviceProfile(device: MeshDevice, profile: DeviceProf
 
   const configSections = presentSections(CONFIG_SECTION_LABELS, profile.config as unknown as Record<string, unknown>);
   for (const [i, kind] of configSections.entries()) {
-    onProgress?.(`Enviando configuración: ${CONFIG_SECTION_LABELS[kind]}…`, {
+    onProgress?.(t("progress.sendingConfigSection", { section: t(CONFIG_SECTION_LABELS[kind]) }), {
       percent: 10 + (i / configSections.length) * 25,
     });
     const value = (profile.config as unknown as Record<string, unknown>)[kind];
@@ -944,9 +959,13 @@ export async function applyDeviceProfile(device: MeshDevice, profile: DeviceProf
   if (profile.channelUrl) {
     const channelSet = parseChannelUrl(profile.channelUrl);
     for (const [index, settings] of channelSet.settings.entries()) {
-      onProgress?.(`Enviando canal ${index === 0 ? "primario" : "secundario"} (${settings.name || "sin nombre"})…`, {
-        percent: 35 + index * 5,
-      });
+      onProgress?.(
+        t("progress.sendingChannel", {
+          which: index === 0 ? t("progress.channelPrimary") : t("progress.channelSecondary"),
+          name: settings.name || t("progress.unnamed"),
+        }),
+        { percent: 35 + index * 5 },
+      );
       await device.setChannel(
         create(ChannelSchema, {
           index,
@@ -962,7 +981,7 @@ export async function applyDeviceProfile(device: MeshDevice, profile: DeviceProf
     profile.moduleConfig as unknown as Record<string, unknown>,
   );
   for (const [i, kind] of moduleConfigSections.entries()) {
-    onProgress?.(`Enviando configuración: ${MODULE_CONFIG_SECTION_LABELS[kind]}…`, {
+    onProgress?.(t("progress.sendingModuleConfigSection", { section: t(MODULE_CONFIG_SECTION_LABELS[kind]) }), {
       percent: 60 + (i / moduleConfigSections.length) * 25,
     });
     const value = (profile.moduleConfig as unknown as Record<string, unknown>)[kind];
@@ -971,7 +990,7 @@ export async function applyDeviceProfile(device: MeshDevice, profile: DeviceProf
     );
   }
 
-  onProgress?.("Reiniciando el nodo para aplicar los cambios…", { percent: 90 });
+  onProgress?.(t("progress.rebooting"), { percent: 90 });
   await device.reboot(2);
-  onProgress?.("Configuración aplicada. El nodo se está reiniciando.", { percent: 100 });
+  onProgress?.(t("progress.applied"), { percent: 100 });
 }

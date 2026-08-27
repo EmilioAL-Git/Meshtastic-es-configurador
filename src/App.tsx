@@ -33,6 +33,9 @@ import {
 } from "./presets/loraPresets";
 import { PROVINCE_CHANNELS } from "./presets/provinceChannels";
 import { TELEMETRY_PRESETS, type TelemetryPresetDef } from "./presets/telemetryPresets";
+import { useI18n } from "./i18n";
+import type { MessageKey } from "./i18n/locales/es";
+import { LanguageSwitcher } from "./components/LanguageSwitcher";
 
 type ConnectionVia = "usb" | "bluetooth" | "network";
 
@@ -42,13 +45,23 @@ type ConnectionState =
   | { status: "connected"; via: ConnectionVia; device: MeshDevice }
   | { status: "error"; message: string };
 
-const VIA_LABELS: Record<ConnectionVia, string> = { usb: "USB", bluetooth: "Bluetooth", network: "red" };
+const VIA_LABEL_KEYS: Record<ConnectionVia, MessageKey> = { usb: "via.usb", bluetooth: "via.bluetooth", network: "via.network" };
 
 type ChannelNameMode = "standard" | "custom";
 type SecondarySelection = "custom" | string;
+type ConfigTab = "simple" | "advanced";
+
+const SIMPLE_PRESETS: { presetId: string; labelKey: MessageKey; hintKey: MessageKey }[] = [
+  { presetId: "SFNARROW", labelKey: "simple.preset.sfnarrow.label", hintKey: "simple.preset.sfnarrow.hint" },
+  { presetId: "MEDIUM_FAST", labelKey: "simple.preset.mediumfast.label", hintKey: "simple.preset.mediumfast.hint" },
+  { presetId: "LONG_FAST", labelKey: "simple.preset.longfast.label", hintKey: "simple.preset.longfast.hint" },
+];
+const PRESET_MAP_URL = "https://meshtastic.es/docs/mapas#mapa-presets";
 
 function App() {
+  const { t } = useI18n();
   const [conn, setConn] = useState<ConnectionState>({ status: "disconnected" });
+  const [configTab, setConfigTab] = useState<ConfigTab>("simple");
   const [region, setRegion] = useState<LoRaRegion>("EU_868");
   const loraPresets = getPresetsForRegion(region);
   const [loraPresetId, setLoraPresetId] = useState(loraPresets[0].id);
@@ -118,10 +131,10 @@ function App() {
       // "Conectado", ya habrían pasado y el panel se quedaría esperando para siempre.
       const { device, stopSnapshotTracking, getDeviceProfileSource } =
         via === "usb"
-          ? await connectSerial(appendLog, setDeviceSnapshot, onDeviceCreated)
+          ? await connectSerial(t, appendLog, setDeviceSnapshot, onDeviceCreated)
           : via === "bluetooth"
-            ? await connectBluetooth(appendLog, setDeviceSnapshot, onDeviceCreated)
-            : await connectNetwork(networkHostPort, networkTls, appendLog, setDeviceSnapshot, onDeviceCreated);
+            ? await connectBluetooth(t, appendLog, setDeviceSnapshot, onDeviceCreated)
+            : await connectNetwork(networkHostPort, networkTls, t, appendLog, setDeviceSnapshot, onDeviceCreated);
       if (connectSeqRef.current !== seq) {
         // Se canceló (botón "Desconectar") mientras conectaba: descarta esta conexión.
         stopSnapshotTracking();
@@ -132,10 +145,10 @@ function App() {
       stopSnapshotTrackingRef.current = stopSnapshotTracking;
       getDeviceProfileSourceRef.current = getDeviceProfileSource;
       setConn({ status: "connected", via, device });
-      appendLog(`Conectado por ${VIA_LABELS[via]}.`);
+      appendLog(t("connect.connectedLog", { via: t(VIA_LABEL_KEYS[via]) }));
     } catch (err) {
       if (connectSeqRef.current !== seq) return;
-      setConn({ status: "error", message: translateError(err) });
+      setConn({ status: "error", message: translateError(err, t) });
     }
   }
 
@@ -167,7 +180,7 @@ function App() {
     connectingDeviceRef.current = null;
     setConn({ status: "disconnected" });
     setDeviceSnapshot(null);
-    if (wasConnecting) appendLog("Conexión cancelada.");
+    if (wasConnecting) appendLog(t("connect.cancelled"));
   }
 
   function handleChannelNameModeChange(next: ChannelNameMode) {
@@ -183,6 +196,12 @@ function App() {
     if (!stillValid) {
       setLoraPresetId(getPresetsForRegion(next)[0].id);
     }
+  }
+
+  function handleSimplePresetSelect(presetId: string) {
+    setRegion("EU_868");
+    setLoraPresetId(presetId);
+    setTelemetryPresetId(TELEMETRY_PRESETS[0].id);
   }
 
   function handleAddSecondaryChannel() {
@@ -240,7 +259,7 @@ function App() {
     setApplying(true);
     setProgress(0);
     try {
-      await applyPreset(conn.device, {
+      await applyPreset(conn.device, t, {
         lora,
         channel,
         secondaryChannel,
@@ -249,7 +268,7 @@ function App() {
         onProgress: appendLog,
       });
     } catch (err) {
-      appendLog(`Error: ${translateError(err)}`);
+      appendLog(t("applyLog.error", { message: translateError(err, t) }));
     } finally {
       setApplying(false);
     }
@@ -261,7 +280,7 @@ function App() {
     const json = exportDeviceProfileJson(source);
     const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
     downloadTextFile(`meshtastic-config-${stamp}.json`, json);
-    appendLog("Configuración actual guardada en un fichero.");
+    appendLog(t("sidebar.savedLog"));
   }
 
   function handleUploadConfigClick() {
@@ -275,9 +294,9 @@ function App() {
     try {
       const text = await file.text();
       const profile = parseDeviceProfileJson(text);
-      setImportPending({ profile, sections: describeDeviceProfile(profile) });
+      setImportPending({ profile, sections: describeDeviceProfile(profile, t) });
     } catch (err) {
-      appendLog(`Error al leer el fichero de configuración: ${translateError(err)}`);
+      appendLog(t("sidebar.uploadErrorLog", { message: translateError(err, t) }));
     }
   }
 
@@ -292,9 +311,9 @@ function App() {
     setApplying(true);
     setProgress(0);
     try {
-      await applyDeviceProfile(conn.device, profile, appendLog);
+      await applyDeviceProfile(conn.device, profile, t, appendLog);
     } catch (err) {
-      appendLog(`Error: ${translateError(err)}`);
+      appendLog(t("applyLog.error", { message: translateError(err, t) }));
     } finally {
       setApplying(false);
     }
@@ -309,21 +328,22 @@ function App() {
             MESHTASTIC ESPAÑA <em>/ Configurador</em>
           </span>
         </div>
-        <span className="tagline">Ajustes de LoRa, canal y telemetría en un clic</span>
+        <div className="header-right">
+          <span className="tagline">{t("header.tagline")}</span>
+          <LanguageSwitcher />
+        </div>
       </header>
 
       <main className="app-main">
         {!serialSupported && !bluetoothSupported && (
-          <div className="browser-warning">
-            Tu navegador no soporta Web Serial ni Web Bluetooth. Usa Chrome o Edge de escritorio.
-          </div>
+          <div className="browser-warning">{t("browserWarning")}</div>
         )}
 
         <div className={`layout${conn.status === "connected" || conn.status === "connecting" ? " has-sidebar" : ""}`}>
         <div className="main-column">
         <section className="panel">
           <h2>
-            <span className="step">1</span> Conecta tu nodo
+            <span className="step">1</span> {t("connect.step")}
           </h2>
           <div className="connect-buttons">
             <button
@@ -332,7 +352,7 @@ function App() {
               disabled={!serialSupported || conn.status === "connecting" || conn.status === "connected"}
               onClick={() => handleConnect("usb")}
             >
-              Conectar por USB
+              {t("connect.usb")}
             </button>
             <button
               type="button"
@@ -340,7 +360,7 @@ function App() {
               disabled={!bluetoothSupported || conn.status === "connecting" || conn.status === "connected"}
               onClick={() => handleConnect("bluetooth")}
             >
-              Conectar por Bluetooth
+              {t("connect.bluetooth")}
             </button>
             <button
               type="button"
@@ -348,18 +368,18 @@ function App() {
               disabled={conn.status === "connecting" || conn.status === "connected"}
               onClick={handleOpenNetworkModal}
             >
-              Conectar por red
+              {t("connect.network")}
             </button>
             {(conn.status === "connected" || conn.status === "connecting") && (
               <button type="button" className="btn" onClick={handleDisconnect}>
-                {conn.status === "connecting" ? "Cancelar" : "Desconectar"}
+                {conn.status === "connecting" ? t("connect.cancel") : t("connect.disconnect")}
               </button>
             )}
           </div>
 
-          {conn.status === "connecting" && <p className="status-line">Conectando…</p>}
-          {conn.status === "connected" && <p className="status-line ok">Conectado ({VIA_LABELS[conn.via]}).</p>}
-          {conn.status === "error" && <p className="status-line error">Error: {conn.message}</p>}
+          {conn.status === "connecting" && <p className="status-line">{t("connect.connecting")}</p>}
+          {conn.status === "connected" && <p className="status-line ok">{t("connect.connected", { via: t(VIA_LABEL_KEYS[conn.via]) })}</p>}
+          {conn.status === "error" && <p className="status-line error">{t("connect.error", { message: conn.message })}</p>}
 
           {(conn.status === "connecting" || applying) && progress !== null && (
             <div className="progress-bar" role="progressbar" aria-valuenow={Math.round(progress)} aria-valuemin={0} aria-valuemax={100}>
@@ -373,28 +393,73 @@ function App() {
 
         <section className="panel">
           <h2>
-            <span className="step">2</span> Elige la configuración
+            <span className="step">2</span> {t("config.step")}
           </h2>
 
+          <div className="tabs" role="tablist">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={configTab === "simple"}
+              className={`tab-button${configTab === "simple" ? " active" : ""}`}
+              onClick={() => setConfigTab("simple")}
+            >
+              {t("config.tab.simple")}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={configTab === "advanced"}
+              className={`tab-button${configTab === "advanced" ? " active" : ""}`}
+              onClick={() => setConfigTab("advanced")}
+            >
+              {t("config.tab.advanced")}
+            </button>
+          </div>
+
+          {configTab === "simple" ? (
+            <div className="field">
+              <label>{t("simple.presetLabel")}</label>
+              <div className="simple-preset-buttons">
+                {SIMPLE_PRESETS.map((p) => (
+                  <button
+                    key={p.presetId}
+                    type="button"
+                    className={`btn simple-preset-button${loraPresetId === p.presetId && region === "EU_868" ? " active" : ""}`}
+                    onClick={() => handleSimplePresetSelect(p.presetId)}
+                  >
+                    <span className="simple-preset-label">{t(p.labelKey)}</span>
+                    <span className="simple-preset-hint">{t(p.hintKey)}</span>
+                  </button>
+                ))}
+              </div>
+              <span className="hint">
+                {t("simple.hintPrefix")}{" "}
+                <a href={PRESET_MAP_URL} target="_blank" rel="noopener noreferrer">
+                  {t("simple.hintLink")}
+                </a>
+                .
+              </span>
+            </div>
+          ) : (
+            <>
           <div className="field">
-            <label htmlFor="lora-region">Banda / región</label>
+            <label htmlFor="lora-region">{t("advanced.region.label")}</label>
             <select
               id="lora-region"
               value={region}
               onChange={(e) => handleRegionChange(e.target.value as LoRaRegion)}
             >
-              <option value="EU_868">868 MHz</option>
-              <option value="LORA_24">2.4 GHz</option>
+              <option value="EU_868">{t("advanced.region.868")}</option>
+              <option value="LORA_24">{t("advanced.region.24")}</option>
             </select>
             <span className="hint">
-              {region === "LORA_24"
-                ? "Requiere un nodo con radio de 2.4GHz. No es compatible con nodos que solo llevan radio de 868MHz."
-                : "Banda habitual en la mayoría de nodos Meshtastic."}
+              {region === "LORA_24" ? t("advanced.region.hint24") : t("advanced.region.hint868")}
             </span>
           </div>
 
           <div className="field">
-            <label htmlFor="lora-preset">Preset LoRa</label>
+            <label htmlFor="lora-preset">{t("advanced.loraPreset.label")}</label>
             <select id="lora-preset" value={loraPresetId} onChange={(e) => setLoraPresetId(e.target.value)}>
               {loraPresets.map((p) => (
                 <option key={p.id} value={p.id}>
@@ -406,56 +471,45 @@ function App() {
           </div>
 
           <div className="field">
-            <label htmlFor="channel-name-mode">Nombre del canal primario</label>
+            <label htmlFor="channel-name-mode">{t("advanced.channelNameMode.label")}</label>
             <select
               id="channel-name-mode"
               value={channelNameMode}
               onChange={(e) => handleChannelNameModeChange(e.target.value as ChannelNameMode)}
             >
-              <option value="standard">Estándar ({defaultChannelName})</option>
-              <option value="custom">Personalizado</option>
+              <option value="standard">{t("advanced.channelNameMode.standard", { name: defaultChannelName })}</option>
+              <option value="custom">{t("advanced.channelNameMode.custom")}</option>
             </select>
             {channelNameMode === "custom" ? (
               <>
                 <input
                   value={customChannelName}
                   onChange={(e) => setCustomChannelName(e.target.value)}
-                  placeholder="p.ej. AlbaceteMesh"
+                  placeholder={t("advanced.channelNameMode.customPlaceholder")}
                   maxLength={11}
                 />
                 <span className="hint warning">
-                  Un nombre de canal distinto de "{defaultChannelName}" no es la configuración normal/estándar de este
-                  preset: tu nodo dejará de encontrar automáticamente a otros nodos que usen el nombre estándar. Solo
-                  cámbialo si sabes lo que haces o tu grupo lo usa así deliberadamente.
+                  {t("advanced.channelNameMode.customWarning", { name: defaultChannelName })}
                 </span>
               </>
             ) : (
-              <span className="hint">
-                Nombre estándar recomendado para este preset; se usa además para derivar la frecuencia del canal.
-              </span>
+              <span className="hint">{t("advanced.channelNameMode.standardHint")}</span>
             )}
           </div>
 
           {channelNameMode === "custom" && (
             <div className="field">
-              <label htmlFor="primary-psk">Clave del canal (PSK, en base64)</label>
+              <label htmlFor="primary-psk">{t("advanced.primaryPsk.label")}</label>
               <input
                 id="primary-psk"
                 value={primaryPskText}
                 onChange={(e) => setPrimaryPskText(e.target.value)}
-                placeholder="p.ej. AQ=="
+                placeholder={t("advanced.primaryPsk.placeholder")}
               />
               {primaryPskInvalid ? (
-                <span className="hint warning">
-                  Esa clave no es válida: debe ser el texto en base64 tal como lo muestra la app o una URL de canal de
-                  Meshtastic (1 byte para claves públicas tipo "AQ==", o 16/32 bytes para AES128/256), no la frase o
-                  contraseña del grupo escrita tal cual.
-                </span>
+                <span className="hint warning">{t("advanced.primaryPsk.invalid")}</span>
               ) : (
-                <span className="hint">
-                  Ya viene rellenada con la clave pública estándar ("AQ=="). Déjala así, vacíala para no cifrar, o
-                  escribe la PSK real de tu comunidad si la conoces.
-                </span>
+                <span className="hint">{t("advanced.primaryPsk.hint")}</span>
               )}
             </div>
           )}
@@ -463,17 +517,17 @@ function App() {
           <div className="field">
             {!secondaryVisible ? (
               <button type="button" className="btn" onClick={handleAddSecondaryChannel}>
-                + Añadir otro canal
+                {t("secondary.add")}
               </button>
             ) : (
               <>
-                <label htmlFor="secondary-channel">Canal adicional</label>
+                <label htmlFor="secondary-channel">{t("secondary.label")}</label>
                 <select
                   id="secondary-channel"
                   value={secondarySelection}
                   onChange={(e) => handleSecondarySelectionChange(e.target.value)}
                 >
-                  <option value="custom">Personalizado</option>
+                  <option value="custom">{t("secondary.custom")}</option>
                   {PROVINCE_CHANNELS.map((p) => (
                     <option key={p.id} value={p.id}>
                       {p.label}
@@ -484,37 +538,31 @@ function App() {
                   <input
                     value={secondaryChannelName}
                     onChange={(e) => setSecondaryChannelName(e.target.value)}
-                    placeholder="Nombre del canal"
+                    placeholder={t("secondary.namePlaceholder")}
                     maxLength={11}
                   />
                 )}
                 <input
                   value={secondaryPskText}
                   onChange={(e) => setSecondaryPskText(e.target.value)}
-                  placeholder={secondarySelection === "custom" ? "PSK en base64 (vacío = sin cifrar)" : "p.ej. AQ=="}
+                  placeholder={secondarySelection === "custom" ? t("secondary.pskPlaceholderCustom") : t("secondary.pskPlaceholderProvince")}
                 />
                 {secondaryPskInvalid ? (
-                  <span className="hint warning">
-                    Esa clave no es válida: debe ser el texto en base64 tal como lo muestra la app o una URL de canal
-                    de Meshtastic (1 byte para claves públicas tipo "AQ==", o 16/32 bytes para AES128/256), no la
-                    frase o contraseña del grupo escrita tal cual.
-                  </span>
+                  <span className="hint warning">{t("secondary.pskInvalid")}</span>
                 ) : (
                   <span className="hint">
-                    {secondarySelection === "custom"
-                      ? "Vacío = sin cifrar. Escribe la PSK del grupo si la tienes."
-                      : "Ya viene rellenada con la clave estándar de esta provincia; cámbiala solo si tu grupo usa una propia."}
+                    {secondarySelection === "custom" ? t("secondary.hintCustom") : t("secondary.hintProvince")}
                   </span>
                 )}
                 <button type="button" className="link-button" onClick={handleRemoveSecondaryChannel}>
-                  Quitar canal
+                  {t("secondary.remove")}
                 </button>
               </>
             )}
           </div>
 
           <div className="field">
-            <label htmlFor="telemetry-preset">Intervalo de telemetría</label>
+            <label htmlFor="telemetry-preset">{t("telemetry.label")}</label>
             <select
               id="telemetry-preset"
               value={telemetryPresetId}
@@ -529,11 +577,19 @@ function App() {
             <span className="hint">
               {TELEMETRY_PRESETS.find((p) => p.id === telemetryPresetId)?.description}{" "}
               <a href="https://meshtastic.es/docs/buenas-practicas" target="_blank" rel="noopener noreferrer">
-                Ver guía de buenas prácticas
+                {t("telemetry.hintLink")}
               </a>
               .
             </span>
           </div>
+
+          <div className="field">
+            <button type="button" className="btn" disabled title={t("moreConfig.tooltip")}>
+              {t("moreConfig.button")}
+            </button>
+          </div>
+            </>
+          )}
 
           <button
             type="button"
@@ -547,24 +603,24 @@ function App() {
             }
             onClick={handleRequestApply}
           >
-            {applying ? "Aplicando…" : "Aplicar configuración al nodo"}
+            {applying ? t("apply.buttonBusy") : t("apply.button")}
           </button>
         </section>
         </div>
 
         {(conn.status === "connected" || conn.status === "connecting") && (
           <aside className="panel side-panel">
-            <h2>Configuración actual del nodo</h2>
+            <h2>{t("sidebar.title")}</h2>
             <DeviceInfoPanel snapshot={deviceSnapshot} />
 
             {conn.status === "connected" && (
               <>
                 <div className="connect-buttons">
                   <button type="button" className="btn" onClick={handleSaveConfig}>
-                    💾 Guardar configuración actual
+                    {t("sidebar.save")}
                   </button>
                   <button type="button" className="btn" disabled={applying} onClick={handleUploadConfigClick}>
-                    📤 Subir configuración
+                    {t("sidebar.upload")}
                   </button>
                   <input
                     ref={importFileInputRef}
@@ -574,11 +630,7 @@ function App() {
                     onChange={handleUploadConfigFile}
                   />
                 </div>
-                <span className="hint">
-                  El fichero es un perfil de dispositivo Meshtastic en JSON (el mismo formato que exportan la app
-                  oficial y el CLI): identidad, canales y toda la configuración del nodo. Por seguridad, la clave
-                  privada del nodo nunca se incluye en el fichero exportado.
-                </span>
+                <span className="hint">{t("sidebar.hint")}</span>
               </>
             )}
           </aside>
@@ -620,14 +672,14 @@ function App() {
       )}
 
       <footer className="app-footer">
-        <span>Herramienta no oficial de la comunidad Meshtastic España</span>
+        <span>{t("footer.unofficial")}</span>
         <span>
           <a href="https://meshtastic.es" target="_blank" rel="noopener noreferrer">
             meshtastic.es
           </a>
           {" · "}
           <a href="https://mapa.meshtastic.es" target="_blank" rel="noopener noreferrer">
-            mapa
+            {t("footer.mapa")}
           </a>
         </span>
       </footer>
@@ -635,22 +687,23 @@ function App() {
   );
 }
 
-const ROLE_LABELS: Record<string, string> = { PRIMARY: "Primario", SECONDARY: "Secundario" };
+const ROLE_LABEL_KEYS: Record<string, MessageKey> = { PRIMARY: "deviceInfo.channels.role.primary", SECONDARY: "deviceInfo.channels.role.secondary" };
 
 function DeviceInfoPanel({ snapshot }: { snapshot: DeviceSnapshot | null }) {
+  const { t } = useI18n();
   if (!snapshot || (!snapshot.longName && !snapshot.lora && snapshot.channels.length === 0 && !snapshot.telemetry)) {
-    return <p className="hint">Esperando datos del nodo…</p>;
+    return <p className="hint">{t("deviceInfo.waiting")}</p>;
   }
 
   return (
     <div className="device-info">
       {(snapshot.longName || snapshot.shortName) && (
         <div className="device-info-group">
-          <h3>Identidad</h3>
+          <h3>{t("deviceInfo.identity.title")}</h3>
           <dl>
             {snapshot.longName && (
               <div>
-                <dt>Nombre</dt>
+                <dt>{t("deviceInfo.identity.name")}</dt>
                 <dd>
                   {snapshot.longName} {snapshot.shortName && `(${snapshot.shortName})`}
                 </dd>
@@ -658,13 +711,13 @@ function DeviceInfoPanel({ snapshot }: { snapshot: DeviceSnapshot | null }) {
             )}
             {snapshot.hwModel && (
               <div>
-                <dt>Hardware</dt>
+                <dt>{t("deviceInfo.identity.hardware")}</dt>
                 <dd>{snapshot.hwModel}</dd>
               </div>
             )}
             {snapshot.nodeNum !== null && (
               <div>
-                <dt>Núm. nodo</dt>
+                <dt>{t("deviceInfo.identity.nodeNum")}</dt>
                 <dd>{snapshot.nodeNum}</dd>
               </div>
             )}
@@ -674,14 +727,14 @@ function DeviceInfoPanel({ snapshot }: { snapshot: DeviceSnapshot | null }) {
 
       {snapshot.lora && (
         <div className="device-info-group">
-          <h3>LoRa</h3>
+          <h3>{t("deviceInfo.lora.title")}</h3>
           <dl>
             <div>
-              <dt>Región</dt>
+              <dt>{t("deviceInfo.lora.region")}</dt>
               <dd>{snapshot.lora.region}</dd>
             </div>
             <div>
-              <dt>Preset</dt>
+              <dt>{t("deviceInfo.lora.preset")}</dt>
               <dd>
                 {snapshot.lora.usePreset
                   ? snapshot.lora.modemPreset
@@ -690,16 +743,16 @@ function DeviceInfoPanel({ snapshot }: { snapshot: DeviceSnapshot | null }) {
             </div>
             {snapshot.lora.overrideFrequency > 0 && (
               <div>
-                <dt>Frecuencia fija</dt>
+                <dt>{t("deviceInfo.lora.fixedFreq")}</dt>
                 <dd>{snapshot.lora.overrideFrequency.toFixed(3)} MHz</dd>
               </div>
             )}
             <div>
-              <dt>Potencia</dt>
-              <dd>{snapshot.lora.txPower === 0 ? "Automática" : `${snapshot.lora.txPower} dBm`}</dd>
+              <dt>{t("deviceInfo.lora.power")}</dt>
+              <dd>{snapshot.lora.txPower === 0 ? t("deviceInfo.lora.powerAuto") : `${snapshot.lora.txPower} dBm`}</dd>
             </div>
             <div>
-              <dt>Máx. saltos</dt>
+              <dt>{t("deviceInfo.lora.hopLimit")}</dt>
               <dd>{snapshot.lora.hopLimit}</dd>
             </div>
           </dl>
@@ -708,14 +761,14 @@ function DeviceInfoPanel({ snapshot }: { snapshot: DeviceSnapshot | null }) {
 
       {snapshot.channels.length > 0 && (
         <div className="device-info-group">
-          <h3>Canales</h3>
+          <h3>{t("deviceInfo.channels.title")}</h3>
           <ul className="channel-list">
             {snapshot.channels.map((c) => (
               <li key={c.index}>
                 <span className="channel-index">{c.index}</span>
                 <span className="channel-name">{c.name}</span>
-                <span className="channel-tag">{ROLE_LABELS[c.role] ?? c.role}</span>
-                <span className="channel-tag">{c.encrypted ? "🔒" : "sin cifrar"}</span>
+                <span className="channel-tag">{c.role in ROLE_LABEL_KEYS ? t(ROLE_LABEL_KEYS[c.role]) : c.role}</span>
+                <span className="channel-tag">{c.encrypted ? "🔒" : t("deviceInfo.channels.unencrypted")}</span>
               </li>
             ))}
           </ul>
@@ -724,22 +777,22 @@ function DeviceInfoPanel({ snapshot }: { snapshot: DeviceSnapshot | null }) {
 
       {snapshot.telemetry && (
         <div className="device-info-group">
-          <h3>Telemetría</h3>
+          <h3>{t("deviceInfo.telemetry.title")}</h3>
           <dl>
             <div>
-              <dt>Dispositivo</dt>
+              <dt>{t("deviceInfo.telemetry.device")}</dt>
               <dd>
                 {snapshot.telemetry.deviceUpdateInterval === 0
-                  ? "por defecto del firmware"
-                  : formatInterval(snapshot.telemetry.deviceUpdateInterval)}
+                  ? t("deviceInfo.telemetry.deviceDefault")
+                  : formatInterval(snapshot.telemetry.deviceUpdateInterval, t)}
               </dd>
             </div>
             <div>
-              <dt>Entorno</dt>
+              <dt>{t("deviceInfo.telemetry.environment")}</dt>
               <dd>
                 {snapshot.telemetry.environmentMeasurementEnabled
-                  ? formatInterval(snapshot.telemetry.environmentUpdateInterval)
-                  : "desactivada"}
+                  ? formatInterval(snapshot.telemetry.environmentUpdateInterval, t)
+                  : t("deviceInfo.telemetry.disabled")}
               </dd>
             </div>
           </dl>
@@ -749,7 +802,7 @@ function DeviceInfoPanel({ snapshot }: { snapshot: DeviceSnapshot | null }) {
   );
 }
 
-const REGION_LABELS: Record<string, string> = { EU_868: "868 MHz", LORA_24: "2.4 GHz" };
+const REGION_LABEL_KEYS: Record<string, MessageKey> = { EU_868: "region.868", LORA_24: "region.24" };
 
 function loraSummary(lora: {
   usePreset: boolean;
@@ -796,67 +849,68 @@ function ConfirmApplyModal({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
+  const { t } = useI18n();
+  const regionLabel = (code: string) => (code in REGION_LABEL_KEYS ? t(REGION_LABEL_KEYS[code]) : code);
   const primaryBefore = snapshot?.channels.find((c) => c.role === "PRIMARY");
   const secondaryBefore = snapshot?.channels.find((c) => c.role === "SECONDARY");
-  const secondaryAfterLabel = secondaryVisible && secondaryPsk !== null ? secondaryChannelName.trim() || "(sin nombre)" : "(ninguno)";
+  const secondaryAfterLabel =
+    secondaryVisible && secondaryPsk !== null ? secondaryChannelName.trim() || t("confirmApply.unnamed") : t("confirmApply.none");
 
   const rows: CompareRow[] = [
     {
-      label: "Región",
-      before: snapshot?.lora ? REGION_LABELS[snapshot.lora.region] ?? snapshot.lora.region : "desconocida",
-      after: REGION_LABELS[region] ?? region,
+      label: t("confirmApply.row.region"),
+      before: snapshot?.lora ? regionLabel(snapshot.lora.region) : t("confirmApply.unknown"),
+      after: regionLabel(region),
     },
     {
-      label: "Preset LoRa",
-      before: snapshot?.lora ? loraSummary(snapshot.lora) : "desconocido",
+      label: t("confirmApply.row.loraPreset"),
+      before: snapshot?.lora ? loraSummary(snapshot.lora) : t("confirmApply.unknownM"),
       after: lora.values.overrideFrequency ? `${lora.label} · ${lora.values.overrideFrequency.toFixed(3)} MHz` : lora.label,
     },
     {
-      label: "Canal primario",
-      before: primaryBefore ? primaryBefore.name : "desconocido",
-      after: channelName.trim() || "(sin nombre)",
+      label: t("confirmApply.row.primaryChannel"),
+      before: primaryBefore ? primaryBefore.name : t("confirmApply.unknownM"),
+      after: channelName.trim() || t("confirmApply.unnamed"),
     },
     {
-      label: "Cifrado canal primario",
-      before: primaryBefore ? (primaryBefore.encrypted ? "sí" : "no") : "desconocido",
-      after: primaryPsk.length > 0 ? "sí" : "no",
+      label: t("confirmApply.row.primaryEncryption"),
+      before: primaryBefore ? (primaryBefore.encrypted ? t("confirmApply.yes") : t("confirmApply.no")) : t("confirmApply.unknownM"),
+      after: primaryPsk.length > 0 ? t("confirmApply.yes") : t("confirmApply.no"),
     },
     {
-      label: "Canal secundario",
-      before: secondaryBefore ? secondaryBefore.name : "(ninguno)",
+      label: t("confirmApply.row.secondaryChannel"),
+      before: secondaryBefore ? secondaryBefore.name : t("confirmApply.none"),
       after: secondaryAfterLabel,
     },
     {
-      label: "Telemetría dispositivo",
-      before: snapshot?.telemetry ? formatInterval(snapshot.telemetry.deviceUpdateInterval) : "desconocida",
-      after: formatInterval(telemetry.values.deviceUpdateInterval),
+      label: t("confirmApply.row.telemetryDevice"),
+      before: snapshot?.telemetry ? formatInterval(snapshot.telemetry.deviceUpdateInterval, t) : t("confirmApply.unknown"),
+      after: formatInterval(telemetry.values.deviceUpdateInterval, t),
     },
     {
-      label: "Telemetría entorno",
+      label: t("confirmApply.row.telemetryEnvironment"),
       before: snapshot?.telemetry
         ? snapshot.telemetry.environmentMeasurementEnabled
-          ? formatInterval(snapshot.telemetry.environmentUpdateInterval)
-          : "desactivada"
-        : "desconocida",
+          ? formatInterval(snapshot.telemetry.environmentUpdateInterval, t)
+          : t("deviceInfo.telemetry.disabled")
+        : t("confirmApply.unknown"),
       after: telemetry.values.environmentMeasurementEnabled
-        ? formatInterval(telemetry.values.environmentUpdateInterval)
-        : "desactivada",
+        ? formatInterval(telemetry.values.environmentUpdateInterval, t)
+        : t("deviceInfo.telemetry.disabled"),
     },
   ];
 
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true">
       <div className="modal modal-wide">
-        <h3>¿Seguro que quieres aplicar esta configuración?</h3>
-        <p className="hint">
-          El nodo se reiniciará al terminar. Revisa los cambios antes de continuar.
-        </p>
+        <h3>{t("confirmApply.title")}</h3>
+        <p className="hint">{t("confirmApply.subtitle")}</p>
         <table className="compare-table">
           <thead>
             <tr>
               <th></th>
-              <th>Antes</th>
-              <th>Después</th>
+              <th>{t("confirmApply.colBefore")}</th>
+              <th>{t("confirmApply.colAfter")}</th>
             </tr>
           </thead>
           <tbody>
@@ -871,10 +925,10 @@ function ConfirmApplyModal({
         </table>
         <div className="modal-actions">
           <button type="button" className="btn" onClick={onCancel}>
-            Cancelar
+            {t("confirmApply.cancel")}
           </button>
           <button type="button" className="btn btn-primary" onClick={onConfirm}>
-            Sí, aplicar
+            {t("confirmApply.confirm")}
           </button>
         </div>
       </div>
@@ -891,17 +945,15 @@ function ImportConfirmModal({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
+  const { t } = useI18n();
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true">
       <div className="modal modal-wide">
-        <h3>¿Aplicar esta configuración al nodo?</h3>
-        <p className="hint warning">
-          Esto sobrescribe la configuración del nodo con la de este fichero y lo reinicia al terminar. Revísala antes
-          de continuar.
-        </p>
+        <h3>{t("importConfirm.title")}</h3>
+        <p className="hint warning">{t("importConfirm.warning")}</p>
         <div className="device-info modal-scroll">
           {sections.length === 0 ? (
-            <p className="hint">El fichero no trae ningún ajuste reconocible.</p>
+            <p className="hint">{t("importConfirm.empty")}</p>
           ) : (
             sections.map((section) => (
               <div className="device-info-group" key={section.title}>
@@ -920,10 +972,10 @@ function ImportConfirmModal({
         </div>
         <div className="modal-actions">
           <button type="button" className="btn" onClick={onCancel}>
-            Cancelar
+            {t("confirmApply.cancel")}
           </button>
           <button type="button" className="btn btn-primary" onClick={onConfirm}>
-            Sí, aplicar
+            {t("confirmApply.confirm")}
           </button>
         </div>
       </div>
@@ -950,27 +1002,28 @@ function NetworkConnectModal({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
+  const { t } = useI18n();
   const handleEnter = (e: { key: string }) => {
     if (e.key === "Enter" && address.trim() !== "") onConfirm();
   };
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true">
       <div className="modal">
-        <h3>Conectar por red</h3>
+        <h3>{t("networkModal.title")}</h3>
         <div className="field network-connect-row">
           <div className="network-address-field">
-            <label htmlFor="network-address">IP u host del nodo</label>
+            <label htmlFor="network-address">{t("networkModal.address.label")}</label>
             <input
               id="network-address"
               autoFocus
               value={address}
               onChange={(e) => onAddressChange(e.target.value)}
-              placeholder="p.ej. 192.168.1.50 o meshtastic.local"
+              placeholder={t("networkModal.address.placeholder")}
               onKeyDown={handleEnter}
             />
           </div>
           <div className="network-port-field">
-            <label htmlFor="network-port">Puerto</label>
+            <label htmlFor="network-port">{t("networkModal.port.label")}</label>
             <input
               id="network-port"
               value={port}
@@ -981,27 +1034,20 @@ function NetworkConnectModal({
             />
           </div>
         </div>
-        <span className="hint">
-          Usa la IP u host del nodo en tu red local (visible en la pantalla del nodo o en tu router). El nodo debe
-          tener la interfaz web habilitada.
-        </span>
+        <span className="hint">{t("networkModal.hint")}</span>
         <div className="field">
           <label className="network-tls-check">
             <input type="checkbox" checked={tls} onChange={(e) => onTlsChange(e.target.checked)} />
-            Usar HTTPS
+            {t("networkModal.tls.label")}
           </label>
-          <span className="hint">
-            Actívalo solo si tu nodo tiene TLS habilitado en su interfaz web. Si esta página se sirve por HTTPS,
-            tu nodo también deberá usar HTTPS, porque el navegador bloquea conexiones HTTP simples desde una página
-            segura.
-          </span>
+          <span className="hint">{t("networkModal.tls.hint")}</span>
         </div>
         <div className="modal-actions">
           <button type="button" className="btn" onClick={onCancel}>
-            Cancelar
+            {t("confirmApply.cancel")}
           </button>
           <button type="button" className="btn btn-primary" disabled={address.trim() === ""} onClick={onConfirm}>
-            Conectar
+            {t("networkModal.connect")}
           </button>
         </div>
       </div>

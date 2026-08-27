@@ -1,0 +1,51 @@
+/* Paleta y tipografía tomadas de mapa.meshtastic.es, para que este configurador
+   encaje visualmente con el resto de herramientas de la comunidad. */
+:root {
+  --bg: #0b0f1a;
+  --panel: #111827;
+  --panel2: #1a2236;
+  --border: #1f2d45;
+  --accent: #5eead4;
+  --accent2: #7dd3fc;
+  --warn: #fbbf24;
+  --danger: #ef4444;
+  --text: #e2e8f0;
+  --muted: #64748b;
+  --mono: "Space Mono", ui-monospace, Consolas, monospace;
+  --sans: "DM Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --radius: 8px;
+  --shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--mono);
+  font-weight: 700;
+  margin: 0;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}

@@ -1,13 +1,19 @@
-import { create } from "@bufbuild/protobuf";
+import { create, fromBinary, fromJson, toBinary, toJson } from "@bufbuild/protobuf";
 import { MeshDevice, Protobuf, Types } from "@meshtastic/core";
 import { TransportWebSerial } from "@meshtastic/transport-web-serial";
 import { TransportWebBluetooth } from "@meshtastic/transport-web-bluetooth";
+import { TransportHTTP } from "@meshtastic/transport-http";
 import type { LoRaPresetDef } from "../presets/loraPresets";
 import type { TelemetryPresetDef } from "../presets/telemetryPresets";
 
 const { ConfigSchema, Config_LoRaConfigSchema } = Protobuf.Config;
 const { ModuleConfigSchema, ModuleConfig_TelemetryConfigSchema } = Protobuf.ModuleConfig;
 const { ChannelSchema, ChannelSettingsSchema, Channel_Role } = Protobuf.Channel;
+const { UserSchema } = Protobuf.Mesh;
+const { ChannelSetSchema } = Protobuf.AppOnly;
+const { LocalConfigSchema, LocalModuleConfigSchema } = Protobuf.LocalOnly;
+const { DeviceProfileSchema } = Protobuf.ClientOnly;
+export type DeviceProfile = Protobuf.ClientOnly.DeviceProfile;
 
 export interface ChannelPreset {
   name: string;
@@ -50,6 +56,17 @@ export function encodePskBase64(psk: Uint8Array): string {
   return btoa(String.fromCharCode(...psk));
 }
 
+/** Base64 "url-safe" sin padding: el formato que usan las URLs de canal `meshtastic.org/e/#...`. */
+function bytesToBase64Url(bytes: Uint8Array): string {
+  return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function base64UrlToBytes(base64Url: string): Uint8Array {
+  const padded = base64Url.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(base64Url.length / 4) * 4, "=");
+  const binary = atob(padded);
+  return Uint8Array.from(binary, (c) => c.charCodeAt(0));
+}
+
 const KNOWN_ERROR_TRANSLATIONS: Array<[RegExp, string]> = [
   [/no port selected/i, "No se ha seleccionado ningún puerto."],
   [/no devices found/i, "No se ha encontrado ningún dispositivo."],
@@ -59,6 +76,7 @@ const KNOWN_ERROR_TRANSLATIONS: Array<[RegExp, string]> = [
   [/gatt operation failed/i, "Fallo de comunicación Bluetooth con el dispositivo (GATT)."],
   [/failed to open/i, "No se ha podido abrir el puerto."],
   [/tiempo de espera agotado/i, "Tiempo de espera agotado esperando la configuración inicial del dispositivo."],
+  [/failed to fetch/i, "No se ha podido contactar con el nodo por red. Comprueba la IP/host y que esté en la misma red."],
 ];
 
 /** Traduce al español los mensajes de error habituales de Web Serial/Bluetooth y del SDK; si no reconoce el mensaje, lo deja tal cual. */
@@ -189,10 +207,12 @@ function requestConfigure(device: MeshDevice): void {
   device.configure().catch(() => {});
 }
 
-/** Resultado de conectar: el dispositivo y cómo dejar de escuchar su configuración (llamar al desconectar). */
+/** Resultado de conectar: el dispositivo, cómo dejar de escuchar su configuración (llamar al
+ * desconectar), y cómo leer lo que se ha ido recogiendo de ella para exportarla. */
 export interface ConnectResult {
   device: MeshDevice;
   stopSnapshotTracking: () => void;
+  getDeviceProfileSource: () => DeviceProfileSource;
 }
 
 export async function connectSerial(onProgress?: ProgressFn, onSnapshot?: (snapshot: DeviceSnapshot) => void): Promise<ConnectResult> {
@@ -203,7 +223,7 @@ export async function connectSerial(onProgress?: ProgressFn, onSnapshot?: (snaps
   // handshake de conexión (los mismos eventos que usa trackConnectionProgress) — hay
   // que escucharlos desde YA, no después de que `configured` resuelva, porque para
   // entonces ya han pasado y no se repiten.
-  const stopSnapshotTracking = onSnapshot ? subscribeDeviceSnapshot(device, onSnapshot) : () => {};
+  const tracking = subscribeDeviceSnapshot(device, onSnapshot);
   const stopTracking = trackConnectionProgress(device, onProgress);
   try {
     requestConfigure(device);
@@ -211,14 +231,14 @@ export async function connectSerial(onProgress?: ProgressFn, onSnapshot?: (snaps
   } finally {
     stopTracking();
   }
-  return { device, stopSnapshotTracking };
+  return { device, stopSnapshotTracking: tracking.stop, getDeviceProfileSource: tracking.getRaw };
 }
 
 export async function connectBluetooth(onProgress?: ProgressFn, onSnapshot?: (snapshot: DeviceSnapshot) => void): Promise<ConnectResult> {
   const transport = await TransportWebBluetooth.create();
   const device = new MeshDevice(transport);
   silenceDeviceLogger(device);
-  const stopSnapshotTracking = onSnapshot ? subscribeDeviceSnapshot(device, onSnapshot) : () => {};
+  const tracking = subscribeDeviceSnapshot(device, onSnapshot);
   const stopTracking = trackConnectionProgress(device, onProgress);
   try {
     requestConfigure(device);
@@ -226,7 +246,34 @@ export async function connectBluetooth(onProgress?: ProgressFn, onSnapshot?: (sn
   } finally {
     stopTracking();
   }
-  return { device, stopSnapshotTracking };
+  return { device, stopSnapshotTracking: tracking.stop, getDeviceProfileSource: tracking.getRaw };
+}
+
+/**
+ * Conecta por red (WiFi/Ethernet) hablando con la API HTTP del propio nodo
+ * (`/api/v1/toradio` y `/api/v1/fromradio`), la misma que usa la app oficial para el
+ * modo "cliente HTTP". `address` acepta host o IP, opcionalmente con puerto
+ * (`192.168.1.50` o `192.168.1.50:80`); `tls` fuerza `https://` en vez de `http://` para
+ * nodos con TLS habilitado en su interfaz web.
+ */
+export async function connectNetwork(
+  address: string,
+  tls: boolean,
+  onProgress?: ProgressFn,
+  onSnapshot?: (snapshot: DeviceSnapshot) => void,
+): Promise<ConnectResult> {
+  const transport = await TransportHTTP.create(address.trim(), tls);
+  const device = new MeshDevice(transport);
+  silenceDeviceLogger(device);
+  const tracking = subscribeDeviceSnapshot(device, onSnapshot);
+  const stopTracking = trackConnectionProgress(device, onProgress);
+  try {
+    requestConfigure(device);
+    await waitUntilConfigured(device);
+  } finally {
+    stopTracking();
+  }
+  return { device, stopSnapshotTracking: tracking.stop, getDeviceProfileSource: tracking.getRaw };
 }
 
 /** Espera a que el dispositivo termine el handshake inicial (DeviceConfigured). */
@@ -295,18 +342,46 @@ const EMPTY_SNAPSHOT: DeviceSnapshot = {
 };
 
 /**
+ * Configuración cruda (mensajes protobuf tal cual los manda el nodo, no la versión
+ * traducida a texto de `DeviceSnapshot`) que necesitamos guardar para poder exportarla
+ * como perfil de dispositivo compatible con el formato JSON propio de Meshtastic.
+ */
+export interface DeviceProfileSource {
+  longName: string | null;
+  shortName: string | null;
+  lora: Protobuf.Config.Config_LoRaConfig | null;
+  telemetry: Protobuf.ModuleConfig.ModuleConfig_TelemetryConfig | null;
+  /** Canales activos (sin los slots DISABLED), en orden de índice; el [0] es siempre el primario. */
+  channels: Protobuf.Channel.Channel[];
+}
+
+const EMPTY_PROFILE_SOURCE: DeviceProfileSource = {
+  longName: null,
+  shortName: null,
+  lora: null,
+  telemetry: null,
+  channels: [],
+};
+
+/**
  * Se suscribe a los eventos del dispositivo para ir montando (y mantener al día,
  * mientras dure la conexión) una foto de la configuración que el nodo ya tiene:
- * identidad, LoRa, canales y telemetría. Llama a `onUpdate` con una copia nueva cada
- * vez que llega un dato relevante — normalmente varias veces durante el handshake
- * inicial, y de nuevo si el propio nodo cambia algo de configuración más adelante.
+ * identidad, LoRa, canales y telemetría. Llama a `onUpdate` (si se da) con una copia
+ * nueva cada vez que llega un dato relevante — normalmente varias veces durante el
+ * handshake inicial, y de nuevo si el propio nodo cambia algo de configuración más
+ * adelante. `getRaw` devuelve en cualquier momento los mensajes protobuf crudos
+ * recogidos hasta ahora, usados para exportar el perfil del dispositivo.
  */
-export function subscribeDeviceSnapshot(device: MeshDevice, onUpdate: (snapshot: DeviceSnapshot) => void): () => void {
+export function subscribeDeviceSnapshot(
+  device: MeshDevice,
+  onUpdate?: (snapshot: DeviceSnapshot) => void,
+): { stop: () => void; getRaw: () => DeviceProfileSource } {
   let snapshot: DeviceSnapshot = { ...EMPTY_SNAPSHOT, channels: [] };
+  let raw: DeviceProfileSource = { ...EMPTY_PROFILE_SOURCE, channels: [] };
   let myNodeNum: number | null = null;
 
   function emit() {
-    onUpdate({ ...snapshot, channels: [...snapshot.channels] });
+    onUpdate?.({ ...snapshot, channels: [...snapshot.channels] });
   }
 
   const unsubs: Array<() => void> = [
@@ -323,6 +398,7 @@ export function subscribeDeviceSnapshot(device: MeshDevice, onUpdate: (snapshot:
         shortName: nodeInfo.user.shortName || null,
         hwModel: Protobuf.Mesh.HardwareModel[nodeInfo.user.hwModel] ?? null,
       };
+      raw = { ...raw, longName: nodeInfo.user.longName || null, shortName: nodeInfo.user.shortName || null };
       emit();
     }),
     device.events.onConfigPacket.subscribe((config) => {
@@ -343,6 +419,7 @@ export function subscribeDeviceSnapshot(device: MeshDevice, onUpdate: (snapshot:
           hopLimit: l.hopLimit,
         },
       };
+      raw = { ...raw, lora: l };
       emit();
     }),
     device.events.onModuleConfigPacket.subscribe((moduleConfig) => {
@@ -356,6 +433,7 @@ export function subscribeDeviceSnapshot(device: MeshDevice, onUpdate: (snapshot:
           environmentUpdateInterval: t.environmentUpdateInterval,
         },
       };
+      raw = { ...raw, telemetry: t };
       emit();
     }),
     device.events.onChannelPacket.subscribe((channel) => {
@@ -372,10 +450,18 @@ export function subscribeDeviceSnapshot(device: MeshDevice, onUpdate: (snapshot:
       channels.push(entry);
       channels.sort((a, b) => a.index - b.index);
       snapshot = { ...snapshot, channels };
+
+      const rawChannels = raw.channels.filter((c) => c.index !== channel.index);
+      rawChannels.push(channel);
+      rawChannels.sort((a, b) => a.index - b.index);
+      raw = { ...raw, channels: rawChannels };
       emit();
     }),
   ];
-  return () => unsubs.forEach((unsub) => unsub());
+  return {
+    stop: () => unsubs.forEach((unsub) => unsub()),
+    getRaw: () => ({ ...raw, channels: [...raw.channels] }),
+  };
 }
 
 export interface ApplyPresetOptions {
@@ -439,6 +525,136 @@ export async function applyPreset(device: MeshDevice, opts: ApplyPresetOptions):
   );
 
   onProgress?.("Reiniciando el nodo para aplicar los cambios…", { percent: 80 });
+  await device.reboot(2);
+  onProgress?.("Configuración aplicada. El nodo se está reiniciando.", { percent: 100 });
+}
+
+const CHANNEL_URL_PREFIX = "https://meshtastic.org/e/#";
+
+/**
+ * Construye la URL de canales (`https://meshtastic.org/e/#...`) que usan la app oficial
+ * y las URLs de invitación de Meshtastic: un `ChannelSet` (canales + config LoRa)
+ * serializado en protobuf binario y codificado en base64 "url-safe".
+ */
+function buildChannelUrl(channels: Protobuf.Channel.Channel[], lora: Protobuf.Config.Config_LoRaConfig | null): string {
+  const channelSet = create(ChannelSetSchema, {
+    settings: channels
+      .filter((c) => c.settings)
+      .map((c) => create(ChannelSettingsSchema, { name: c.settings?.name, psk: c.settings?.psk })),
+    loraConfig: lora ?? undefined,
+  });
+  const bytes = toBinary(ChannelSetSchema, channelSet);
+  return CHANNEL_URL_PREFIX + bytesToBase64Url(bytes);
+}
+
+/** Decodifica una URL de canales de Meshtastic (o solo su parte en base64) a un `ChannelSet`. */
+function parseChannelUrl(channelUrl: string): Protobuf.AppOnly.ChannelSet {
+  const encoded = channelUrl.includes("#") ? channelUrl.slice(channelUrl.lastIndexOf("#") + 1) : channelUrl;
+  return fromBinary(ChannelSetSchema, base64UrlToBytes(encoded.trim()));
+}
+
+/**
+ * Exporta la configuración que ya conocemos del nodo conectado (identidad, LoRa,
+ * canales y telemetría) como un `DeviceProfile` en JSON — el mismo formato que usan
+ * "Exportar configuración"/"Importar configuración" en la app oficial de Meshtastic.
+ * Solo incluye las secciones que gestiona este configurador; el resto del perfil del
+ * nodo (posición, pantalla, módulos no gestionados aquí, etc.) no se exporta.
+ */
+export function exportDeviceProfileJson(source: DeviceProfileSource): string {
+  const profile = create(DeviceProfileSchema, {
+    longName: source.longName ?? undefined,
+    shortName: source.shortName ?? undefined,
+    channelUrl: source.channels.length > 0 ? buildChannelUrl(source.channels, source.lora) : undefined,
+    config: source.lora ? create(LocalConfigSchema, { lora: source.lora }) : undefined,
+    moduleConfig: source.telemetry ? create(LocalModuleConfigSchema, { telemetry: source.telemetry }) : undefined,
+  });
+  return JSON.stringify(toJson(DeviceProfileSchema, profile), null, 2);
+}
+
+/** Descarga `content` como fichero en el navegador (usado para guardar el JSON exportado). */
+export function downloadTextFile(filename: string, content: string, mimeType = "application/json"): void {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * Interpreta un fichero de perfil de dispositivo Meshtastic (el JSON que exportan la
+ * app oficial, el CLI o este mismo configurador). Lanza si el texto no es JSON válido o
+ * no tiene la forma de un `DeviceProfile`.
+ */
+export function parseDeviceProfileJson(jsonText: string): DeviceProfile {
+  const parsed = JSON.parse(jsonText);
+  return fromJson(DeviceProfileSchema, parsed);
+}
+
+/** Resumen legible de un perfil ya interpretado, para mostrar antes de aplicarlo. */
+export interface DeviceProfileSummary {
+  longName: string | null;
+  shortName: string | null;
+  channelCount: number;
+  hasLora: boolean;
+  hasTelemetry: boolean;
+}
+
+export function summarizeDeviceProfile(profile: DeviceProfile): DeviceProfileSummary {
+  const channelSet = profile.channelUrl ? parseChannelUrl(profile.channelUrl) : null;
+  return {
+    longName: profile.longName ?? null,
+    shortName: profile.shortName ?? null,
+    channelCount: channelSet?.settings.length ?? 0,
+    hasLora: !!profile.config?.lora,
+    hasTelemetry: !!profile.moduleConfig?.telemetry,
+  };
+}
+
+/**
+ * Aplica un `DeviceProfile` importado a un nodo ya conectado: nombre, config LoRa,
+ * canales (decodificados de `channelUrl`, primero PRIMARY y el resto SECONDARY) y
+ * telemetría — solo las secciones presentes en el perfil, y solo las que gestiona este
+ * configurador. Reinicia el nodo al terminar, igual que `applyPreset`.
+ */
+export async function applyDeviceProfile(device: MeshDevice, profile: DeviceProfile, onProgress?: ProgressFn): Promise<void> {
+  if (profile.longName || profile.shortName) {
+    onProgress?.("Enviando nombre del nodo…", { percent: 5 });
+    await device.setOwner(
+      create(UserSchema, { longName: profile.longName ?? "", shortName: profile.shortName ?? "" }),
+    );
+  }
+
+  if (profile.config?.lora) {
+    onProgress?.("Enviando configuración LoRa…", { percent: 20 });
+    await device.setConfig(create(ConfigSchema, { payloadVariant: { case: "lora", value: profile.config.lora } }));
+  }
+
+  if (profile.channelUrl) {
+    const channelSet = parseChannelUrl(profile.channelUrl);
+    for (const [index, settings] of channelSet.settings.entries()) {
+      onProgress?.(`Enviando canal ${index === 0 ? "primario" : "secundario"} (${settings.name || "sin nombre"})…`, {
+        percent: 30 + index * 10,
+      });
+      await device.setChannel(
+        create(ChannelSchema, {
+          index,
+          role: index === 0 ? Channel_Role.PRIMARY : Channel_Role.SECONDARY,
+          settings,
+        }),
+      );
+    }
+  }
+
+  if (profile.moduleConfig?.telemetry) {
+    onProgress?.("Enviando intervalos de telemetría…", { percent: 70 });
+    await device.setModuleConfig(
+      create(ModuleConfigSchema, { payloadVariant: { case: "telemetry", value: profile.moduleConfig.telemetry } }),
+    );
+  }
+
+  onProgress?.("Reiniciando el nodo para aplicar los cambios…", { percent: 90 });
   await device.reboot(2);
   onProgress?.("Configuración aplicada. El nodo se está reiniciando.", { percent: 100 });
 }

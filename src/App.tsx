@@ -1,17 +1,26 @@
-import { useRef, useState } from "react";
+import { useRef, useState, type ChangeEvent } from "react";
 import type { MeshDevice } from "@meshtastic/core";
 import "./App.css";
 import {
+  applyDeviceProfile,
   applyPreset,
   connectBluetooth,
+  connectNetwork,
   connectSerial,
   decodeCustomPsk,
   defaultSimplePsk,
+  downloadTextFile,
   encodePskBase64,
+  exportDeviceProfileJson,
   isWebBluetoothSupported,
   isWebSerialSupported,
+  parseDeviceProfileJson,
+  summarizeDeviceProfile,
   translateError,
   type ChannelPreset,
+  type DeviceProfile,
+  type DeviceProfileSource,
+  type DeviceProfileSummary,
   type DeviceSnapshot,
 } from "./lib/meshtastic";
 import {
@@ -24,11 +33,15 @@ import {
 import { PROVINCE_CHANNELS } from "./presets/provinceChannels";
 import { TELEMETRY_PRESETS, type TelemetryPresetDef } from "./presets/telemetryPresets";
 
+type ConnectionVia = "usb" | "bluetooth" | "network";
+
 type ConnectionState =
   | { status: "disconnected" }
-  | { status: "connecting"; via: "usb" | "bluetooth" }
-  | { status: "connected"; via: "usb" | "bluetooth"; device: MeshDevice }
+  | { status: "connecting"; via: ConnectionVia }
+  | { status: "connected"; via: ConnectionVia; device: MeshDevice }
   | { status: "error"; message: string };
+
+const VIA_LABELS: Record<ConnectionVia, string> = { usb: "USB", bluetooth: "Bluetooth", network: "red" };
 
 type ChannelNameMode = "standard" | "custom";
 type SecondarySelection = "custom" | string;
@@ -63,16 +76,22 @@ function App() {
   const [applying, setApplying] = useState(false);
   const [deviceSnapshot, setDeviceSnapshot] = useState<DeviceSnapshot | null>(null);
   const stopSnapshotTrackingRef = useRef<(() => void) | null>(null);
+  const getDeviceProfileSourceRef = useRef<(() => DeviceProfileSource) | null>(null);
+  const importFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [importPending, setImportPending] = useState<{ profile: DeviceProfile; summary: DeviceProfileSummary } | null>(null);
 
   const serialSupported = isWebSerialSupported();
   const bluetoothSupported = isWebBluetoothSupported();
+  const [networkAddress, setNetworkAddress] = useState("");
+  const [networkTls, setNetworkTls] = useState(false);
 
   function appendLog(line: string, opts?: { replace?: boolean; percent?: number }) {
     setLog((prev) => (opts?.replace && prev.length > 0 ? [...prev.slice(0, -1), line] : [...prev, line]));
     if (opts?.percent !== undefined) setProgress(opts.percent);
   }
 
-  async function handleConnect(via: "usb" | "bluetooth") {
+  async function handleConnect(via: ConnectionVia) {
+    if (via === "network" && networkAddress.trim() === "") return;
     stopSnapshotTrackingRef.current?.();
     stopSnapshotTrackingRef.current = null;
     setConn({ status: "connecting", via });
@@ -82,13 +101,18 @@ function App() {
     try {
       // La identidad/LoRa/canales/telemetría llegan durante el propio handshake, así
       // que hay que empezar a escucharlos desde ya (dentro de connectSerial/
-      // connectBluetooth) — si nos suscribiéramos después de "Conectado", ya habrían
-      // pasado y el panel se quedaría esperando para siempre.
-      const { device, stopSnapshotTracking } =
-        via === "usb" ? await connectSerial(appendLog, setDeviceSnapshot) : await connectBluetooth(appendLog, setDeviceSnapshot);
+      // connectBluetooth/connectNetwork) — si nos suscribiéramos después de
+      // "Conectado", ya habrían pasado y el panel se quedaría esperando para siempre.
+      const { device, stopSnapshotTracking, getDeviceProfileSource } =
+        via === "usb"
+          ? await connectSerial(appendLog, setDeviceSnapshot)
+          : via === "bluetooth"
+            ? await connectBluetooth(appendLog, setDeviceSnapshot)
+            : await connectNetwork(networkAddress, networkTls, appendLog, setDeviceSnapshot);
       stopSnapshotTrackingRef.current = stopSnapshotTracking;
+      getDeviceProfileSourceRef.current = getDeviceProfileSource;
       setConn({ status: "connected", via, device });
-      appendLog(`Conectado por ${via === "usb" ? "USB" : "Bluetooth"}.`);
+      appendLog(`Conectado por ${VIA_LABELS[via]}.`);
     } catch (err) {
       setConn({ status: "error", message: translateError(err) });
     }
@@ -97,6 +121,7 @@ function App() {
   async function handleDisconnect() {
     stopSnapshotTrackingRef.current?.();
     stopSnapshotTrackingRef.current = null;
+    getDeviceProfileSourceRef.current = null;
     if (conn.status === "connected") {
       await conn.device.disconnect();
     }
@@ -189,6 +214,51 @@ function App() {
     }
   }
 
+  function handleSaveConfig() {
+    if (conn.status !== "connected" || !getDeviceProfileSourceRef.current) return;
+    const source = getDeviceProfileSourceRef.current();
+    const json = exportDeviceProfileJson(source);
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    downloadTextFile(`meshtastic-config-${stamp}.json`, json);
+    appendLog("Configuración actual guardada en un fichero.");
+  }
+
+  function handleUploadConfigClick() {
+    importFileInputRef.current?.click();
+  }
+
+  async function handleUploadConfigFile(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const profile = parseDeviceProfileJson(text);
+      setImportPending({ profile, summary: summarizeDeviceProfile(profile) });
+    } catch (err) {
+      appendLog(`Error al leer el fichero de configuración: ${translateError(err)}`);
+    }
+  }
+
+  function handleCancelImport() {
+    setImportPending(null);
+  }
+
+  async function handleConfirmImport() {
+    if (conn.status !== "connected" || !importPending) return;
+    const { profile } = importPending;
+    setImportPending(null);
+    setApplying(true);
+    setProgress(0);
+    try {
+      await applyDeviceProfile(conn.device, profile, appendLog);
+    } catch (err) {
+      appendLog(`Error: ${translateError(err)}`);
+    } finally {
+      setApplying(false);
+    }
+  }
+
   return (
     <div className="shell">
       <header className="app-header">
@@ -238,10 +308,70 @@ function App() {
             )}
           </div>
 
-          {conn.status === "connecting" && <p className="status-line">Conectando…</p>}
           {conn.status === "connected" && (
-            <p className="status-line ok">Conectado ({conn.via === "usb" ? "USB" : "Bluetooth"}).</p>
+            <div className="connect-buttons">
+              <button type="button" className="btn" onClick={handleSaveConfig}>
+                💾 Guardar configuración actual
+              </button>
+              <button type="button" className="btn" disabled={applying} onClick={handleUploadConfigClick}>
+                📤 Subir configuración
+              </button>
+              <input
+                ref={importFileInputRef}
+                type="file"
+                accept="application/json,.json"
+                className="visually-hidden"
+                onChange={handleUploadConfigFile}
+              />
+            </div>
           )}
+          {conn.status === "connected" && (
+            <span className="hint">
+              El fichero es un perfil de dispositivo Meshtastic en JSON (el mismo formato que exportan la app oficial
+              y el CLI). Al subir uno solo se aplican las secciones que gestiona este configurador: nombre del nodo,
+              LoRa, canales y telemetría; el resto del perfil se ignora.
+            </span>
+          )}
+
+          {conn.status !== "connected" && (
+            <div className="field network-connect">
+              <label htmlFor="network-address">Conectar por red (WiFi/IP)</label>
+              <div className="network-connect-row">
+                <input
+                  id="network-address"
+                  value={networkAddress}
+                  onChange={(e) => setNetworkAddress(e.target.value)}
+                  placeholder="p.ej. 192.168.1.50 o meshtastic.local"
+                  disabled={conn.status === "connecting"}
+                />
+                <label className="network-tls-check">
+                  <input
+                    type="checkbox"
+                    checked={networkTls}
+                    onChange={(e) => setNetworkTls(e.target.checked)}
+                    disabled={conn.status === "connecting"}
+                  />
+                  HTTPS
+                </label>
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={networkAddress.trim() === "" || conn.status === "connecting"}
+                  onClick={() => handleConnect("network")}
+                >
+                  Conectar
+                </button>
+              </div>
+              <span className="hint">
+                Usa la IP u host del nodo en tu red local (visible en la pantalla del nodo o en tu router). El nodo
+                debe tener la interfaz web habilitada. Si esta página se sirve por HTTPS, tu nodo también deberá usar
+                HTTPS (marca la casilla) porque el navegador bloquea conexiones HTTP simples desde una página segura.
+              </span>
+            </div>
+          )}
+
+          {conn.status === "connecting" && <p className="status-line">Conectando…</p>}
+          {conn.status === "connected" && <p className="status-line ok">Conectado ({VIA_LABELS[conn.via]}).</p>}
           {conn.status === "error" && <p className="status-line error">Error: {conn.message}</p>}
 
           {(conn.status === "connecting" || applying) && progress !== null && (
@@ -458,6 +588,10 @@ function App() {
           onConfirm={handleApply}
           onCancel={handleCancelApply}
         />
+      )}
+
+      {importPending && conn.status === "connected" && (
+        <ImportConfirmModal summary={importPending.summary} onConfirm={handleConfirmImport} onCancel={handleCancelImport} />
       )}
 
       <footer className="app-footer">
@@ -720,6 +854,55 @@ function ConfirmApplyModal({
             ))}
           </tbody>
         </table>
+        <div className="modal-actions">
+          <button type="button" className="btn" onClick={onCancel}>
+            Cancelar
+          </button>
+          <button type="button" className="btn btn-primary" onClick={onConfirm}>
+            Sí, aplicar
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ImportConfirmModal({
+  summary,
+  onConfirm,
+  onCancel,
+}: {
+  summary: DeviceProfileSummary;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true">
+      <div className="modal">
+        <h3>¿Aplicar esta configuración al nodo?</h3>
+        <p className="hint">El nodo se reiniciará al terminar.</p>
+        <dl>
+          {(summary.longName || summary.shortName) && (
+            <div>
+              <dt>Nombre</dt>
+              <dd>
+                {summary.longName} {summary.shortName && `(${summary.shortName})`}
+              </dd>
+            </div>
+          )}
+          <div>
+            <dt>Config. LoRa</dt>
+            <dd>{summary.hasLora ? "sí" : "no incluida"}</dd>
+          </div>
+          <div>
+            <dt>Canales</dt>
+            <dd>{summary.channelCount > 0 ? summary.channelCount : "ninguno"}</dd>
+          </div>
+          <div>
+            <dt>Telemetría</dt>
+            <dd>{summary.hasTelemetry ? "sí" : "no incluida"}</dd>
+          </div>
+        </dl>
         <div className="modal-actions">
           <button type="button" className="btn" onClick={onCancel}>
             Cancelar

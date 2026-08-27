@@ -273,6 +273,31 @@
   color: var(--danger);
 }
 
+.network-connect-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.network-connect-row input[type="text"],
+.network-connect-row input:not([type]) {
+  flex: 1 1 220px;
+}
+
+.network-tls-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.network-tls-check input {
+  width: auto;
+}
+
 .link-button {
   background: none;
   border: none;
@@ -531,4 +556,16 @@
   font-size: 0.7rem;
   color: var(--muted);
   white-space: nowrap;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }

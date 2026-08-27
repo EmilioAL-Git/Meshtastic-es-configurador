@@ -13,6 +13,7 @@
     "@bufbuild/protobuf": "^2.14.0",
     "@meshtastic/core": "^2.6.7",
     "@meshtastic/protobufs": "^2.7.26",
+    "@meshtastic/transport-http": "^0.2.5",
     "@meshtastic/transport-web-bluetooth": "^0.1.5",
     "@meshtastic/transport-web-serial": "^0.2.5",
     "react": "^19.2.8",

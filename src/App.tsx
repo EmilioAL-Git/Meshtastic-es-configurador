@@ -539,6 +539,12 @@ function DeviceInfoPanel({ snapshot }: { snapshot: DeviceSnapshot | null }) {
                   : `BW ${snapshot.lora.bandwidth}kHz · SF${snapshot.lora.spreadFactor} · CR4/${snapshot.lora.codingRate}`}
               </dd>
             </div>
+            {snapshot.lora.overrideFrequency > 0 && (
+              <div>
+                <dt>Frecuencia fija</dt>
+                <dd>{snapshot.lora.overrideFrequency.toFixed(3)} MHz</dd>
+              </div>
+            )}
             <div>
               <dt>Potencia</dt>
               <dd>{snapshot.lora.txPower === 0 ? "Automática" : `${snapshot.lora.txPower} dBm`}</dd>
@@ -602,8 +608,12 @@ function loraSummary(lora: {
   bandwidth: number;
   spreadFactor: number;
   codingRate: number;
+  overrideFrequency?: number;
 }): string {
-  return lora.usePreset ? lora.modemPreset : `BW ${lora.bandwidth}kHz · SF${lora.spreadFactor} · CR4/${lora.codingRate}`;
+  const base = lora.usePreset
+    ? lora.modemPreset
+    : `BW ${lora.bandwidth}kHz · SF${lora.spreadFactor} · CR4/${lora.codingRate}`;
+  return lora.overrideFrequency ? `${base} · ${lora.overrideFrequency.toFixed(3)} MHz` : base;
 }
 
 interface CompareRow {
@@ -650,7 +660,7 @@ function ConfirmApplyModal({
     {
       label: "Preset LoRa",
       before: snapshot?.lora ? loraSummary(snapshot.lora) : "desconocido",
-      after: lora.label,
+      after: lora.values.overrideFrequency ? `${lora.label} · ${lora.values.overrideFrequency.toFixed(3)} MHz` : lora.label,
     },
     {
       label: "Canal primario",

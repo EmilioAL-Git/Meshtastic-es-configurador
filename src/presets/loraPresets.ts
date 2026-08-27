@@ -25,6 +25,8 @@ export interface LoRaPresetDef {
     bandwidth?: number;
     spreadFactor?: number;
     codingRate?: number;
+    /** MHz. Ignora el cálculo de canal por hash y usa esta frecuencia directamente (`override_frequency` del protobuf). */
+    overrideFrequency?: number;
   };
 }
 
@@ -110,20 +112,19 @@ export const ES_CUSTOM_PRESETS: LoRaPresetDef[] = [
     id: "SFNARROW",
     label: "SFNarrow (Meshtastic España)",
     description:
-      "Preset personalizado de la comunidad para reducir interferencia en la Zona Centro/Levante. BW 62kHz, SF7, CR 4/5, slot 4 (869.618 MHz).",
-    channelNum: 4,
+      "Preset personalizado de la comunidad para reducir interferencia en la Zona Centro/Levante. BW 62kHz, SF7, CR 4/5, frecuencia fija 869.618 MHz (override_frequency, no por slot/hash).",
     region: "EU_868",
     defaultChannelName: "SFNarrow",
-    values: { usePreset: false, bandwidth: 62, spreadFactor: 7, codingRate: 5 },
+    values: { usePreset: false, bandwidth: 62, spreadFactor: 7, codingRate: 5, overrideFrequency: 869.618 },
   },
   {
     id: "SFNARROW_SF6",
     label: "SFNarrow — prueba SF6",
-    description: "Variante experimental de SFNarrow con SF6 (más rápida, algo menos de alcance/sensibilidad).",
-    channelNum: 4,
+    description:
+      "Variante experimental de SFNarrow con SF6 (más rápida, algo menos de alcance/sensibilidad). Frecuencia fija 869.618 MHz.",
     region: "EU_868",
     defaultChannelName: "SFNarrow",
-    values: { usePreset: false, bandwidth: 62, spreadFactor: 6, codingRate: 5 },
+    values: { usePreset: false, bandwidth: 62, spreadFactor: 6, codingRate: 5, overrideFrequency: 869.618 },
   },
   {
     id: "SHORT_PLUS",

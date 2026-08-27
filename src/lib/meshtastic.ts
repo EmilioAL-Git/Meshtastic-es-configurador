@@ -262,6 +262,7 @@ export interface DeviceSnapshotLora {
   spreadFactor: number;
   codingRate: number;
   channelNum: number;
+  overrideFrequency: number;
   txPower: number;
   hopLimit: number;
 }
@@ -337,6 +338,7 @@ export function subscribeDeviceSnapshot(device: MeshDevice, onUpdate: (snapshot:
           spreadFactor: l.spreadFactor,
           codingRate: l.codingRate,
           channelNum: l.channelNum,
+          overrideFrequency: l.overrideFrequency,
           txPower: l.txPower,
           hopLimit: l.hopLimit,
         },
@@ -398,6 +400,7 @@ export async function applyPreset(device: MeshDevice, opts: ApplyPresetOptions):
     spreadFactor: opts.lora.values.spreadFactor ?? 0,
     codingRate: opts.lora.values.codingRate ?? 0,
     channelNum: opts.lora.channelNum ?? 0,
+    overrideFrequency: opts.lora.values.overrideFrequency ?? 0,
     region,
     txEnabled: true,
   });

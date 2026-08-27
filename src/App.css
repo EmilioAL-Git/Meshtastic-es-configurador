@@ -278,15 +278,54 @@
 }
 
 .network-connect-row {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  align-items: center;
+  flex-direction: row;
+  gap: 10px;
+  align-items: flex-start;
 }
 
-.network-connect-row input[type="text"],
-.network-connect-row input:not([type]) {
-  flex: 1 1 220px;
+.network-address-field {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.network-port-field {
+  flex: 0 0 90px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.network-address-field label,
+.network-port-field label {
+  font-size: 0.75rem;
+  font-family: var(--mono);
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.network-address-field input,
+.network-port-field input {
+  padding: 9px 12px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background: var(--panel2);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 0.9rem;
+  outline: none;
+  transition: border-color 0.15s, color 0.15s;
+  width: 100%;
+}
+
+.network-address-field input:hover,
+.network-address-field input:focus,
+.network-port-field input:hover,
+.network-port-field input:focus {
+  border-color: var(--accent);
 }
 
 .network-tls-check {

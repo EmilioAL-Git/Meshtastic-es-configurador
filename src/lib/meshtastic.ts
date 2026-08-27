@@ -344,41 +344,42 @@ const EMPTY_SNAPSHOT: DeviceSnapshot = {
 /**
  * Configuración cruda (mensajes protobuf tal cual los manda el nodo, no la versión
  * traducida a texto de `DeviceSnapshot`) que necesitamos guardar para poder exportarla
- * como perfil de dispositivo compatible con el formato JSON propio de Meshtastic.
+ * como perfil de dispositivo compatible con el formato JSON propio de Meshtastic. `config`
+ * y `moduleConfig` se van rellenando sección a sección (device, position, power, network,
+ * display, lora, bluetooth, security / mqtt, serial, telemetry, etc.) según van llegando
+ * durante el handshake de conexión — el propio nodo manda todas las secciones sin que
+ * haga falta pedirlas una a una.
  */
 export interface DeviceProfileSource {
   longName: string | null;
   shortName: string | null;
-  lora: Protobuf.Config.Config_LoRaConfig | null;
-  telemetry: Protobuf.ModuleConfig.ModuleConfig_TelemetryConfig | null;
+  config: Protobuf.LocalOnly.LocalConfig;
+  moduleConfig: Protobuf.LocalOnly.LocalModuleConfig;
   /** Canales activos (sin los slots DISABLED), en orden de índice; el [0] es siempre el primario. */
   channels: Protobuf.Channel.Channel[];
 }
 
-const EMPTY_PROFILE_SOURCE: DeviceProfileSource = {
-  longName: null,
-  shortName: null,
-  lora: null,
-  telemetry: null,
-  channels: [],
-};
-
 /**
  * Se suscribe a los eventos del dispositivo para ir montando (y mantener al día,
  * mientras dure la conexión) una foto de la configuración que el nodo ya tiene:
- * identidad, LoRa, canales y telemetría. Llama a `onUpdate` (si se da) con una copia
- * nueva cada vez que llega un dato relevante — normalmente varias veces durante el
- * handshake inicial, y de nuevo si el propio nodo cambia algo de configuración más
- * adelante. `getRaw` devuelve en cualquier momento los mensajes protobuf crudos
- * recogidos hasta ahora, usados para exportar el perfil del dispositivo.
+ * identidad, LoRa, canales y telemetría (para el panel de la UI, que solo muestra eso), y
+ * en paralelo la configuración completa cruda del nodo (todas las secciones, para poder
+ * exportarla). Llama a `onUpdate` (si se da) con una copia nueva del resumen para la UI
+ * cada vez que llega un dato relevante — normalmente varias veces durante el handshake
+ * inicial, y de nuevo si el propio nodo cambia algo de configuración más adelante.
+ * `getRaw` devuelve en cualquier momento la configuración cruda recogida hasta ahora.
  */
 export function subscribeDeviceSnapshot(
   device: MeshDevice,
   onUpdate?: (snapshot: DeviceSnapshot) => void,
 ): { stop: () => void; getRaw: () => DeviceProfileSource } {
   let snapshot: DeviceSnapshot = { ...EMPTY_SNAPSHOT, channels: [] };
-  let raw: DeviceProfileSource = { ...EMPTY_PROFILE_SOURCE, channels: [] };
   let myNodeNum: number | null = null;
+  let longName: string | null = null;
+  let shortName: string | null = null;
+  const rawConfig = create(LocalConfigSchema, {}) as Record<string, unknown>;
+  const rawModuleConfig = create(LocalModuleConfigSchema, {}) as Record<string, unknown>;
+  let rawChannels: Protobuf.Channel.Channel[] = [];
 
   function emit() {
     onUpdate?.({ ...snapshot, channels: [...snapshot.channels] });
@@ -392,48 +393,62 @@ export function subscribeDeviceSnapshot(
     }),
     device.events.onNodeInfoPacket.subscribe((nodeInfo) => {
       if (myNodeNum === null || nodeInfo.num !== myNodeNum || !nodeInfo.user) return;
+      longName = nodeInfo.user.longName || null;
+      shortName = nodeInfo.user.shortName || null;
       snapshot = {
         ...snapshot,
-        longName: nodeInfo.user.longName || null,
-        shortName: nodeInfo.user.shortName || null,
+        longName,
+        shortName,
         hwModel: Protobuf.Mesh.HardwareModel[nodeInfo.user.hwModel] ?? null,
       };
-      raw = { ...raw, longName: nodeInfo.user.longName || null, shortName: nodeInfo.user.shortName || null };
       emit();
     }),
+    // El handshake manda una sección de Config por paquete (device, position, power,
+    // network, display, lora, bluetooth, security…) — las guardamos todas para poder
+    // exportar la configuración completa, aunque el panel de la UI solo muestre LoRa.
     device.events.onConfigPacket.subscribe((config) => {
-      if (config.payloadVariant.case !== "lora") return;
-      const l = config.payloadVariant.value;
-      snapshot = {
-        ...snapshot,
-        lora: {
-          region: Protobuf.Config.Config_LoRaConfig_RegionCode[l.region] ?? String(l.region),
-          usePreset: l.usePreset,
-          modemPreset: Protobuf.Config.Config_LoRaConfig_ModemPreset[l.modemPreset] ?? String(l.modemPreset),
-          bandwidth: l.bandwidth,
-          spreadFactor: l.spreadFactor,
-          codingRate: l.codingRate,
-          channelNum: l.channelNum,
-          overrideFrequency: l.overrideFrequency,
-          txPower: l.txPower,
-          hopLimit: l.hopLimit,
-        },
-      };
-      raw = { ...raw, lora: l };
+      const { case: kind, value } = config.payloadVariant;
+      if (!kind || kind === "sessionkey") return;
+      rawConfig[kind] = value;
+
+      if (kind === "lora") {
+        const l = value;
+        snapshot = {
+          ...snapshot,
+          lora: {
+            region: Protobuf.Config.Config_LoRaConfig_RegionCode[l.region] ?? String(l.region),
+            usePreset: l.usePreset,
+            modemPreset: Protobuf.Config.Config_LoRaConfig_ModemPreset[l.modemPreset] ?? String(l.modemPreset),
+            bandwidth: l.bandwidth,
+            spreadFactor: l.spreadFactor,
+            codingRate: l.codingRate,
+            channelNum: l.channelNum,
+            overrideFrequency: l.overrideFrequency,
+            txPower: l.txPower,
+            hopLimit: l.hopLimit,
+          },
+        };
+      }
       emit();
     }),
+    // Igual que con Config: una sección de ModuleConfig por paquete (mqtt, serial,
+    // telemetry, cannedMessage, etc.), todas se guardan para la exportación completa.
     device.events.onModuleConfigPacket.subscribe((moduleConfig) => {
-      if (moduleConfig.payloadVariant.case !== "telemetry") return;
-      const t = moduleConfig.payloadVariant.value;
-      snapshot = {
-        ...snapshot,
-        telemetry: {
-          deviceUpdateInterval: t.deviceUpdateInterval,
-          environmentMeasurementEnabled: t.environmentMeasurementEnabled,
-          environmentUpdateInterval: t.environmentUpdateInterval,
-        },
-      };
-      raw = { ...raw, telemetry: t };
+      const { case: kind, value } = moduleConfig.payloadVariant;
+      if (!kind) return;
+      rawModuleConfig[kind] = value;
+
+      if (kind === "telemetry") {
+        const t = value;
+        snapshot = {
+          ...snapshot,
+          telemetry: {
+            deviceUpdateInterval: t.deviceUpdateInterval,
+            environmentMeasurementEnabled: t.environmentMeasurementEnabled,
+            environmentUpdateInterval: t.environmentUpdateInterval,
+          },
+        };
+      }
       emit();
     }),
     device.events.onChannelPacket.subscribe((channel) => {
@@ -451,16 +466,21 @@ export function subscribeDeviceSnapshot(
       channels.sort((a, b) => a.index - b.index);
       snapshot = { ...snapshot, channels };
 
-      const rawChannels = raw.channels.filter((c) => c.index !== channel.index);
+      rawChannels = rawChannels.filter((c) => c.index !== channel.index);
       rawChannels.push(channel);
       rawChannels.sort((a, b) => a.index - b.index);
-      raw = { ...raw, channels: rawChannels };
       emit();
     }),
   ];
   return {
     stop: () => unsubs.forEach((unsub) => unsub()),
-    getRaw: () => ({ ...raw, channels: [...raw.channels] }),
+    getRaw: () => ({
+      longName,
+      shortName,
+      config: { ...rawConfig } as Protobuf.LocalOnly.LocalConfig,
+      moduleConfig: { ...rawModuleConfig } as Protobuf.LocalOnly.LocalModuleConfig,
+      channels: [...rawChannels],
+    }),
   };
 }
 
@@ -554,21 +574,31 @@ function parseChannelUrl(channelUrl: string): Protobuf.AppOnly.ChannelSet {
 }
 
 /**
- * Exporta la configuración que ya conocemos del nodo conectado (identidad, LoRa,
- * canales y telemetría) como un `DeviceProfile` en JSON — el mismo formato que usan
- * "Exportar configuración"/"Importar configuración" en la app oficial de Meshtastic.
- * Solo incluye las secciones que gestiona este configurador; el resto del perfil del
- * nodo (posición, pantalla, módulos no gestionados aquí, etc.) no se exporta.
+ * Exporta toda la configuración que ya conocemos del nodo conectado (identidad y todas
+ * las secciones de Config/ModuleConfig recibidas durante el handshake, más los canales)
+ * como un `DeviceProfile` en JSON — el mismo formato que usan "Exportar
+ * configuración"/"Importar configuración" en la app oficial de Meshtastic.
  */
 export function exportDeviceProfileJson(source: DeviceProfileSource): string {
+  // La clave privada del nodo (Config.security.private_key) nunca debe salir de él: es
+  // el secreto que le da su identidad criptográfica en la malla. Si se filtra en un
+  // fichero y se reimporta en otro nodo, ambos acabarían compartiendo identidad. La app
+  // oficial hace lo mismo al exportar.
+  const config = source.config.security
+    ? { ...source.config, security: { ...source.config.security, privateKey: new Uint8Array() } }
+    : source.config;
+
   const profile = create(DeviceProfileSchema, {
     longName: source.longName ?? undefined,
     shortName: source.shortName ?? undefined,
-    channelUrl: source.channels.length > 0 ? buildChannelUrl(source.channels, source.lora) : undefined,
-    config: source.lora ? create(LocalConfigSchema, { lora: source.lora }) : undefined,
-    moduleConfig: source.telemetry ? create(LocalModuleConfigSchema, { telemetry: source.telemetry }) : undefined,
+    channelUrl: source.channels.length > 0 ? buildChannelUrl(source.channels, source.config.lora ?? null) : undefined,
+    config: create(LocalConfigSchema, config),
+    moduleConfig: create(LocalModuleConfigSchema, source.moduleConfig),
   });
-  return JSON.stringify(toJson(DeviceProfileSchema, profile), null, 2);
+  // alwaysEmitImplicit: sin esto, protobuf-JSON omite los campos que están en su valor
+  // por defecto (false, 0, "") — p.ej. "usePreset": false desaparecería del todo del
+  // fichero en vez de aparecer explícito, aunque el nodo sí lo tenga así.
+  return JSON.stringify(toJson(DeviceProfileSchema, profile, { alwaysEmitImplicit: true }), null, 2);
 }
 
 /** Descarga `content` como fichero en el navegador (usado para guardar el JSON exportado). */
@@ -592,13 +622,50 @@ export function parseDeviceProfileJson(jsonText: string): DeviceProfile {
   return fromJson(DeviceProfileSchema, parsed);
 }
 
+// Nombre de cada sección para los mensajes de progreso al aplicar un perfil importado.
+const CONFIG_SECTION_LABELS: Record<string, string> = {
+  device: "dispositivo",
+  position: "posición",
+  power: "energía",
+  network: "red",
+  display: "pantalla",
+  lora: "LoRa",
+  bluetooth: "bluetooth",
+  security: "seguridad",
+};
+const MODULE_CONFIG_SECTION_LABELS: Record<string, string> = {
+  mqtt: "MQTT",
+  serial: "módulo serie",
+  externalNotification: "notificaciones externas",
+  storeForward: "store & forward",
+  rangeTest: "prueba de alcance",
+  telemetry: "telemetría",
+  cannedMessage: "mensajes predefinidos",
+  audio: "audio",
+  remoteHardware: "hardware remoto",
+  neighborInfo: "info. de vecinos",
+  ambientLighting: "iluminación ambiental",
+  detectionSensor: "sensor de detección",
+  paxcounter: "contador de personas",
+  statusmessage: "mensaje de estado",
+  trafficManagement: "gestión de tráfico",
+  tak: "TAK",
+};
+
+function presentSections(labels: Record<string, string>, obj: Record<string, unknown> | undefined): string[] {
+  if (!obj) return [];
+  return Object.keys(labels).filter((key) => obj[key] !== undefined);
+}
+
 /** Resumen legible de un perfil ya interpretado, para mostrar antes de aplicarlo. */
 export interface DeviceProfileSummary {
   longName: string | null;
   shortName: string | null;
   channelCount: number;
-  hasLora: boolean;
-  hasTelemetry: boolean;
+  /** Etiquetas legibles de las secciones de Config presentes en el perfil (LoRa, red, seguridad…). */
+  configSections: string[];
+  /** Etiquetas legibles de las secciones de ModuleConfig presentes (telemetría, MQTT…). */
+  moduleConfigSections: string[];
 }
 
 export function summarizeDeviceProfile(profile: DeviceProfile): DeviceProfileSummary {
@@ -607,16 +674,21 @@ export function summarizeDeviceProfile(profile: DeviceProfile): DeviceProfileSum
     longName: profile.longName ?? null,
     shortName: profile.shortName ?? null,
     channelCount: channelSet?.settings.length ?? 0,
-    hasLora: !!profile.config?.lora,
-    hasTelemetry: !!profile.moduleConfig?.telemetry,
+    configSections: presentSections(CONFIG_SECTION_LABELS, profile.config as unknown as Record<string, unknown>).map(
+      (key) => CONFIG_SECTION_LABELS[key],
+    ),
+    moduleConfigSections: presentSections(
+      MODULE_CONFIG_SECTION_LABELS,
+      profile.moduleConfig as unknown as Record<string, unknown>,
+    ).map((key) => MODULE_CONFIG_SECTION_LABELS[key]),
   };
 }
 
 /**
- * Aplica un `DeviceProfile` importado a un nodo ya conectado: nombre, config LoRa,
- * canales (decodificados de `channelUrl`, primero PRIMARY y el resto SECONDARY) y
- * telemetría — solo las secciones presentes en el perfil, y solo las que gestiona este
- * configurador. Reinicia el nodo al terminar, igual que `applyPreset`.
+ * Aplica un `DeviceProfile` importado a un nodo ya conectado: nombre, todas las
+ * secciones de Config y ModuleConfig presentes en el perfil, y canales (decodificados
+ * de `channelUrl`, primero PRIMARY y el resto SECONDARY). Reinicia el nodo al terminar,
+ * igual que `applyPreset`.
  */
 export async function applyDeviceProfile(device: MeshDevice, profile: DeviceProfile, onProgress?: ProgressFn): Promise<void> {
   if (profile.longName || profile.shortName) {
@@ -626,16 +698,22 @@ export async function applyDeviceProfile(device: MeshDevice, profile: DeviceProf
     );
   }
 
-  if (profile.config?.lora) {
-    onProgress?.("Enviando configuración LoRa…", { percent: 20 });
-    await device.setConfig(create(ConfigSchema, { payloadVariant: { case: "lora", value: profile.config.lora } }));
+  const configSections = presentSections(CONFIG_SECTION_LABELS, profile.config as unknown as Record<string, unknown>);
+  for (const [i, kind] of configSections.entries()) {
+    onProgress?.(`Enviando configuración: ${CONFIG_SECTION_LABELS[kind]}…`, {
+      percent: 10 + (i / configSections.length) * 25,
+    });
+    const value = (profile.config as unknown as Record<string, unknown>)[kind];
+    await device.setConfig(
+      create(ConfigSchema, { payloadVariant: { case: kind, value } as Protobuf.Config.Config["payloadVariant"] }),
+    );
   }
 
   if (profile.channelUrl) {
     const channelSet = parseChannelUrl(profile.channelUrl);
     for (const [index, settings] of channelSet.settings.entries()) {
       onProgress?.(`Enviando canal ${index === 0 ? "primario" : "secundario"} (${settings.name || "sin nombre"})…`, {
-        percent: 30 + index * 10,
+        percent: 35 + index * 5,
       });
       await device.setChannel(
         create(ChannelSchema, {
@@ -647,10 +725,17 @@ export async function applyDeviceProfile(device: MeshDevice, profile: DeviceProf
     }
   }
 
-  if (profile.moduleConfig?.telemetry) {
-    onProgress?.("Enviando intervalos de telemetría…", { percent: 70 });
+  const moduleConfigSections = presentSections(
+    MODULE_CONFIG_SECTION_LABELS,
+    profile.moduleConfig as unknown as Record<string, unknown>,
+  );
+  for (const [i, kind] of moduleConfigSections.entries()) {
+    onProgress?.(`Enviando configuración: ${MODULE_CONFIG_SECTION_LABELS[kind]}…`, {
+      percent: 60 + (i / moduleConfigSections.length) * 25,
+    });
+    const value = (profile.moduleConfig as unknown as Record<string, unknown>)[kind];
     await device.setModuleConfig(
-      create(ModuleConfigSchema, { payloadVariant: { case: "telemetry", value: profile.moduleConfig.telemetry } }),
+      create(ModuleConfigSchema, { payloadVariant: { case: kind, value } as Protobuf.ModuleConfig.ModuleConfig["payloadVariant"] }),
     );
   }
 

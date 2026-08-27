@@ -83,7 +83,10 @@ function App() {
   const serialSupported = isWebSerialSupported();
   const bluetoothSupported = isWebBluetoothSupported();
   const [networkAddress, setNetworkAddress] = useState("");
+  const [networkPort, setNetworkPort] = useState("4403");
   const [networkTls, setNetworkTls] = useState(false);
+  const [networkModalOpen, setNetworkModalOpen] = useState(false);
+  const networkHostPort = networkPort.trim() ? `${networkAddress.trim()}:${networkPort.trim()}` : networkAddress.trim();
 
   function appendLog(line: string, opts?: { replace?: boolean; percent?: number }) {
     setLog((prev) => (opts?.replace && prev.length > 0 ? [...prev.slice(0, -1), line] : [...prev, line]));
@@ -108,7 +111,7 @@ function App() {
           ? await connectSerial(appendLog, setDeviceSnapshot)
           : via === "bluetooth"
             ? await connectBluetooth(appendLog, setDeviceSnapshot)
-            : await connectNetwork(networkAddress, networkTls, appendLog, setDeviceSnapshot);
+            : await connectNetwork(networkHostPort, networkTls, appendLog, setDeviceSnapshot);
       stopSnapshotTrackingRef.current = stopSnapshotTracking;
       getDeviceProfileSourceRef.current = getDeviceProfileSource;
       setConn({ status: "connected", via, device });
@@ -116,6 +119,20 @@ function App() {
     } catch (err) {
       setConn({ status: "error", message: translateError(err) });
     }
+  }
+
+  function handleOpenNetworkModal() {
+    setNetworkModalOpen(true);
+  }
+
+  function handleCancelNetworkModal() {
+    setNetworkModalOpen(false);
+  }
+
+  function handleConfirmNetworkModal() {
+    if (networkAddress.trim() === "") return;
+    setNetworkModalOpen(false);
+    handleConnect("network");
   }
 
   async function handleDisconnect() {
@@ -301,49 +318,20 @@ function App() {
             >
               Conectar por Bluetooth
             </button>
+            <button
+              type="button"
+              className="btn"
+              disabled={conn.status === "connecting" || conn.status === "connected"}
+              onClick={handleOpenNetworkModal}
+            >
+              Conectar por red
+            </button>
             {conn.status === "connected" && (
               <button type="button" className="btn" onClick={handleDisconnect}>
                 Desconectar
               </button>
             )}
           </div>
-
-          {conn.status !== "connected" && (
-            <div className="field network-connect">
-              <label htmlFor="network-address">Conectar por red (WiFi/IP)</label>
-              <div className="network-connect-row">
-                <input
-                  id="network-address"
-                  value={networkAddress}
-                  onChange={(e) => setNetworkAddress(e.target.value)}
-                  placeholder="p.ej. 192.168.1.50 o meshtastic.local"
-                  disabled={conn.status === "connecting"}
-                />
-                <label className="network-tls-check">
-                  <input
-                    type="checkbox"
-                    checked={networkTls}
-                    onChange={(e) => setNetworkTls(e.target.checked)}
-                    disabled={conn.status === "connecting"}
-                  />
-                  HTTPS
-                </label>
-                <button
-                  type="button"
-                  className="btn"
-                  disabled={networkAddress.trim() === "" || conn.status === "connecting"}
-                  onClick={() => handleConnect("network")}
-                >
-                  Conectar
-                </button>
-              </div>
-              <span className="hint">
-                Usa la IP u host del nodo en tu red local (visible en la pantalla del nodo o en tu router). El nodo
-                debe tener la interfaz web habilitada. Si esta página se sirve por HTTPS, tu nodo también deberá usar
-                HTTPS (marca la casilla) porque el navegador bloquea conexiones HTTP simples desde una página segura.
-              </span>
-            </div>
-          )}
 
           {conn.status === "connecting" && <p className="status-line">Conectando…</p>}
           {conn.status === "connected" && <p className="status-line ok">Conectado ({VIA_LABELS[conn.via]}).</p>}
@@ -564,8 +552,8 @@ function App() {
                 </div>
                 <span className="hint">
                   El fichero es un perfil de dispositivo Meshtastic en JSON (el mismo formato que exportan la app
-                  oficial y el CLI). Al subir uno solo se aplican las secciones que gestiona este configurador:
-                  nombre del nodo, LoRa, canales y telemetría; el resto del perfil se ignora.
+                  oficial y el CLI): identidad, canales y toda la configuración del nodo. Por seguridad, la clave
+                  privada del nodo nunca se incluye en el fichero exportado.
                 </span>
               </>
             )}
@@ -587,6 +575,19 @@ function App() {
           telemetry={selectedTelemetry}
           onConfirm={handleApply}
           onCancel={handleCancelApply}
+        />
+      )}
+
+      {networkModalOpen && (
+        <NetworkConnectModal
+          address={networkAddress}
+          onAddressChange={setNetworkAddress}
+          port={networkPort}
+          onPortChange={setNetworkPort}
+          tls={networkTls}
+          onTlsChange={setNetworkTls}
+          onConfirm={handleConfirmNetworkModal}
+          onCancel={handleCancelNetworkModal}
         />
       )}
 
@@ -880,7 +881,10 @@ function ImportConfirmModal({
     <div className="modal-backdrop" role="dialog" aria-modal="true">
       <div className="modal">
         <h3>¿Aplicar esta configuración al nodo?</h3>
-        <p className="hint">El nodo se reiniciará al terminar.</p>
+        <p className="hint warning">
+          Esto sobrescribe toda la configuración del nodo con la del fichero (identidad, LoRa, canales y el resto de
+          secciones que incluya el perfil) y lo reinicia al terminar.
+        </p>
         <dl>
           {(summary.longName || summary.shortName) && (
             <div>
@@ -891,16 +895,16 @@ function ImportConfirmModal({
             </div>
           )}
           <div>
-            <dt>Config. LoRa</dt>
-            <dd>{summary.hasLora ? "sí" : "no incluida"}</dd>
-          </div>
-          <div>
             <dt>Canales</dt>
             <dd>{summary.channelCount > 0 ? summary.channelCount : "ninguno"}</dd>
           </div>
           <div>
-            <dt>Telemetría</dt>
-            <dd>{summary.hasTelemetry ? "sí" : "no incluida"}</dd>
+            <dt>Config. incluida</dt>
+            <dd>{summary.configSections.length > 0 ? summary.configSections.join(", ") : "ninguna"}</dd>
+          </div>
+          <div>
+            <dt>Módulos incluidos</dt>
+            <dd>{summary.moduleConfigSections.length > 0 ? summary.moduleConfigSections.join(", ") : "ninguno"}</dd>
           </div>
         </dl>
         <div className="modal-actions">
@@ -909,6 +913,84 @@ function ImportConfirmModal({
           </button>
           <button type="button" className="btn btn-primary" onClick={onConfirm}>
             Sí, aplicar
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function NetworkConnectModal({
+  address,
+  onAddressChange,
+  port,
+  onPortChange,
+  tls,
+  onTlsChange,
+  onConfirm,
+  onCancel,
+}: {
+  address: string;
+  onAddressChange: (value: string) => void;
+  port: string;
+  onPortChange: (value: string) => void;
+  tls: boolean;
+  onTlsChange: (value: boolean) => void;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const handleEnter = (e: { key: string }) => {
+    if (e.key === "Enter" && address.trim() !== "") onConfirm();
+  };
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true">
+      <div className="modal">
+        <h3>Conectar por red</h3>
+        <div className="field network-connect-row">
+          <div className="network-address-field">
+            <label htmlFor="network-address">IP u host del nodo</label>
+            <input
+              id="network-address"
+              autoFocus
+              value={address}
+              onChange={(e) => onAddressChange(e.target.value)}
+              placeholder="p.ej. 192.168.1.50 o meshtastic.local"
+              onKeyDown={handleEnter}
+            />
+          </div>
+          <div className="network-port-field">
+            <label htmlFor="network-port">Puerto</label>
+            <input
+              id="network-port"
+              value={port}
+              onChange={(e) => onPortChange(e.target.value.replace(/[^0-9]/g, ""))}
+              placeholder="4403"
+              inputMode="numeric"
+              onKeyDown={handleEnter}
+            />
+          </div>
+        </div>
+        <span className="hint">
+          Usa la IP u host del nodo en tu red local (visible en la pantalla del nodo o en tu router). El nodo debe
+          tener la interfaz web habilitada.
+        </span>
+        <div className="field">
+          <label className="network-tls-check">
+            <input type="checkbox" checked={tls} onChange={(e) => onTlsChange(e.target.checked)} />
+            Usar HTTPS
+          </label>
+          <span className="hint">
+            Actívalo solo si tu nodo tiene TLS habilitado en su interfaz web. Si esta página se sirve por HTTPS,
+            tu nodo también deberá usar HTTPS, porque el navegador bloquea conexiones HTTP simples desde una página
+            segura.
+          </span>
+        </div>
+        <div className="modal-actions">
+          <button type="button" className="btn" onClick={onCancel}>
+            Cancelar
+          </button>
+          <button type="button" className="btn btn-primary" disabled={address.trim() === ""} onClick={onConfirm}>
+            Conectar
           </button>
         </div>
       </div>

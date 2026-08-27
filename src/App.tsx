@@ -14,9 +14,15 @@ import {
   type ChannelPreset,
   type DeviceSnapshot,
 } from "./lib/meshtastic";
-import { getDefaultChannelName, getPresetsForRegion, LORA_REGION_CODES, type LoRaRegion } from "./presets/loraPresets";
+import {
+  getDefaultChannelName,
+  getPresetsForRegion,
+  LORA_REGION_CODES,
+  type LoRaPresetDef,
+  type LoRaRegion,
+} from "./presets/loraPresets";
 import { PROVINCE_CHANNELS } from "./presets/provinceChannels";
-import { TELEMETRY_PRESETS } from "./presets/telemetryPresets";
+import { TELEMETRY_PRESETS, type TelemetryPresetDef } from "./presets/telemetryPresets";
 
 type ConnectionState =
   | { status: "disconnected" }
@@ -27,14 +33,6 @@ type ConnectionState =
 type ChannelNameMode = "standard" | "custom";
 type SecondarySelection = "custom" | string;
 
-type PskModalContext = "primary" | "secondary";
-
-interface PskModalState {
-  context: PskModalContext;
-  channelLabel: string;
-  initialValue: string;
-}
-
 function App() {
   const [conn, setConn] = useState<ConnectionState>({ status: "disconnected" });
   const [region, setRegion] = useState<LoRaRegion>("EU_868");
@@ -43,17 +41,22 @@ function App() {
   const selectedLora = loraPresets.find((p) => p.id === loraPresetId) ?? loraPresets[0];
   const defaultChannelName = getDefaultChannelName(selectedLora, region);
   const [telemetryPresetId, setTelemetryPresetId] = useState(TELEMETRY_PRESETS[0].id);
+  const selectedTelemetry = TELEMETRY_PRESETS.find((p) => p.id === telemetryPresetId) ?? TELEMETRY_PRESETS[0];
   const [channelNameMode, setChannelNameMode] = useState<ChannelNameMode>("standard");
   const [customChannelName, setCustomChannelName] = useState("");
   const channelName = channelNameMode === "custom" ? customChannelName.trim() : defaultChannelName;
-  const [primaryPsk, setPrimaryPsk] = useState<Uint8Array>(defaultSimplePsk);
+  const [primaryPskText, setPrimaryPskText] = useState(encodePskBase64(defaultSimplePsk));
+  const primaryPskBytes = channelNameMode === "standard" ? defaultSimplePsk : decodeCustomPsk(primaryPskText);
+  const primaryPskInvalid = channelNameMode === "custom" && primaryPskBytes === null;
 
   const [secondaryVisible, setSecondaryVisible] = useState(false);
   const [secondarySelection, setSecondarySelection] = useState<SecondarySelection>("custom");
   const [secondaryChannelName, setSecondaryChannelName] = useState("");
-  const [secondaryPsk, setSecondaryPsk] = useState<Uint8Array | null>(null);
+  const [secondaryPskText, setSecondaryPskText] = useState("");
+  const secondaryPskBytes = secondaryVisible ? decodeCustomPsk(secondaryPskText) : null;
+  const secondaryPskInvalid = secondaryVisible && secondaryPskBytes === null;
 
-  const [pskModal, setPskModal] = useState<PskModalState | null>(null);
+  const [confirmApplyOpen, setConfirmApplyOpen] = useState(false);
 
   const [log, setLog] = useState<string[]>([]);
   const [progress, setProgress] = useState<number | null>(null);
@@ -104,13 +107,7 @@ function App() {
   function handleChannelNameModeChange(next: ChannelNameMode) {
     setChannelNameMode(next);
     if (next === "standard") {
-      setPrimaryPsk(defaultSimplePsk);
-    } else {
-      setPskModal({
-        context: "primary",
-        channelLabel: customChannelName.trim() || "canal personalizado",
-        initialValue: encodePskBase64(primaryPsk),
-      });
+      setPrimaryPskText(encodePskBase64(defaultSimplePsk));
     }
   }
 
@@ -126,61 +123,53 @@ function App() {
     setSecondaryVisible(true);
     setSecondarySelection("custom");
     setSecondaryChannelName("");
-    setPskModal({ context: "secondary", channelLabel: "canal personalizado", initialValue: encodePskBase64(defaultSimplePsk) });
+    setSecondaryPskText("");
   }
 
   function handleRemoveSecondaryChannel() {
     setSecondaryVisible(false);
     setSecondarySelection("custom");
     setSecondaryChannelName("");
-    setSecondaryPsk(null);
+    setSecondaryPskText("");
   }
 
   function handleSecondarySelectionChange(next: SecondarySelection) {
     setSecondarySelection(next);
     if (next === "custom") {
       setSecondaryChannelName("");
-      setPskModal({ context: "secondary", channelLabel: "canal personalizado", initialValue: encodePskBase64(defaultSimplePsk) });
+      setSecondaryPskText("");
       return;
     }
     const province = PROVINCE_CHANNELS.find((p) => p.id === next);
     if (!province) return;
     setSecondaryChannelName(province.channelName);
-    setPskModal({ context: "secondary", channelLabel: province.label, initialValue: encodePskBase64(province.psk) });
-  }
-
-  function handlePskModalConfirm(base64: string) {
-    if (!pskModal) return;
-    const bytes = decodeCustomPsk(base64);
-    if (bytes === null) return;
-    if (pskModal.context === "primary") {
-      setPrimaryPsk(bytes);
-    } else {
-      setSecondaryPsk(bytes);
-    }
-    setPskModal(null);
-  }
-
-  function handlePskModalCancel() {
-    if (pskModal?.context === "secondary" && secondaryPsk === null) {
-      handleRemoveSecondaryChannel();
-    }
-    setPskModal(null);
+    setSecondaryPskText(encodePskBase64(province.psk));
   }
 
   const secondaryChannelReady =
-    !secondaryVisible ||
-    (secondaryPsk !== null && (secondarySelection !== "custom" || secondaryChannelName.trim() !== ""));
+    !secondaryVisible || (!secondaryPskInvalid && (secondarySelection !== "custom" || secondaryChannelName.trim() !== ""));
+
+  function handleRequestApply() {
+    if (conn.status !== "connected" || primaryPskInvalid || !secondaryChannelReady) return;
+    setConfirmApplyOpen(true);
+  }
+
+  function handleCancelApply() {
+    setConfirmApplyOpen(false);
+  }
 
   async function handleApply() {
+    setConfirmApplyOpen(false);
     if (conn.status !== "connected") return;
     const lora = loraPresets.find((p) => p.id === loraPresetId);
     const telemetry = TELEMETRY_PRESETS.find((p) => p.id === telemetryPresetId);
-    if (!lora || !telemetry || !secondaryChannelReady) return;
+    if (!lora || !telemetry || !secondaryChannelReady || primaryPskBytes === null) return;
 
-    const channel: ChannelPreset = { name: channelName.trim(), psk: primaryPsk };
+    const channel: ChannelPreset = { name: channelName.trim(), psk: primaryPskBytes };
     const secondaryChannel: ChannelPreset | undefined =
-      secondaryVisible && secondaryPsk !== null ? { name: secondaryChannelName.trim(), psk: secondaryPsk } : undefined;
+      secondaryVisible && secondaryPskBytes !== null
+        ? { name: secondaryChannelName.trim(), psk: secondaryPskBytes }
+        : undefined;
 
     setApplying(true);
     setProgress(0);
@@ -332,27 +321,25 @@ function App() {
 
           {channelNameMode === "custom" && (
             <div className="field">
-              <label>Clave del canal (PSK)</label>
-              <div className="psk-summary">
-                <code>{encodePskBase64(primaryPsk) || "(sin cifrar)"}</code>
-                <button
-                  type="button"
-                  className="link-button"
-                  onClick={() =>
-                    setPskModal({
-                      context: "primary",
-                      channelLabel: customChannelName.trim() || "canal personalizado",
-                      initialValue: encodePskBase64(primaryPsk),
-                    })
-                  }
-                >
-                  Editar clave
-                </button>
-              </div>
-              <span className="hint">
-                Usa la PSK real de tu comunidad si vas a unirte a una malla existente; si no la conoces,
-                pregunta a quien administra tu grupo.
-              </span>
+              <label htmlFor="primary-psk">Clave del canal (PSK, en base64)</label>
+              <input
+                id="primary-psk"
+                value={primaryPskText}
+                onChange={(e) => setPrimaryPskText(e.target.value)}
+                placeholder="p.ej. AQ=="
+              />
+              {primaryPskInvalid ? (
+                <span className="hint warning">
+                  Esa clave no es válida: debe ser el texto en base64 tal como lo muestra la app o una URL de canal de
+                  Meshtastic (1 byte para claves públicas tipo "AQ==", o 16/32 bytes para AES128/256), no la frase o
+                  contraseña del grupo escrita tal cual.
+                </span>
+              ) : (
+                <span className="hint">
+                  Ya viene rellenada con la clave pública estándar ("AQ=="). Déjala así, vacíala para no cifrar, o
+                  escribe la PSK real de tu comunidad si la conoces.
+                </span>
+              )}
             </div>
           )}
 
@@ -384,26 +371,23 @@ function App() {
                     maxLength={11}
                   />
                 )}
-                {secondaryPsk !== null && (
-                  <div className="psk-summary">
-                    <code>{encodePskBase64(secondaryPsk) || "(sin cifrar)"}</code>
-                    <button
-                      type="button"
-                      className="link-button"
-                      onClick={() =>
-                        setPskModal({
-                          context: "secondary",
-                          channelLabel:
-                            secondarySelection === "custom"
-                              ? secondaryChannelName.trim() || "canal personalizado"
-                              : PROVINCE_CHANNELS.find((p) => p.id === secondarySelection)?.label ?? "",
-                          initialValue: encodePskBase64(secondaryPsk),
-                        })
-                      }
-                    >
-                      Editar clave
-                    </button>
-                  </div>
+                <input
+                  value={secondaryPskText}
+                  onChange={(e) => setSecondaryPskText(e.target.value)}
+                  placeholder={secondarySelection === "custom" ? "PSK en base64 (vacío = sin cifrar)" : "p.ej. AQ=="}
+                />
+                {secondaryPskInvalid ? (
+                  <span className="hint warning">
+                    Esa clave no es válida: debe ser el texto en base64 tal como lo muestra la app o una URL de canal
+                    de Meshtastic (1 byte para claves públicas tipo "AQ==", o 16/32 bytes para AES128/256), no la
+                    frase o contraseña del grupo escrita tal cual.
+                  </span>
+                ) : (
+                  <span className="hint">
+                    {secondarySelection === "custom"
+                      ? "Vacío = sin cifrar. Escribe la PSK del grupo si la tienes."
+                      : "Ya viene rellenada con la clave estándar de esta provincia; cámbiala solo si tu grupo usa una propia."}
+                  </span>
                 )}
                 <button type="button" className="link-button" onClick={handleRemoveSecondaryChannel}>
                   Quitar canal
@@ -437,8 +421,14 @@ function App() {
           <button
             type="button"
             className="apply-button"
-            disabled={conn.status !== "connected" || applying || channelName.trim() === "" || !secondaryChannelReady}
-            onClick={handleApply}
+            disabled={
+              conn.status !== "connected" ||
+              applying ||
+              channelName.trim() === "" ||
+              primaryPskInvalid ||
+              !secondaryChannelReady
+            }
+            onClick={handleRequestApply}
           >
             {applying ? "Aplicando…" : "Aplicar configuración al nodo"}
           </button>
@@ -454,12 +444,19 @@ function App() {
         </div>
       </main>
 
-      {pskModal && (
-        <PskPromptModal
-          channelLabel={pskModal.channelLabel}
-          initialValue={pskModal.initialValue}
-          onConfirm={handlePskModalConfirm}
-          onCancel={handlePskModalCancel}
+      {confirmApplyOpen && conn.status === "connected" && primaryPskBytes !== null && (
+        <ConfirmApplyModal
+          snapshot={deviceSnapshot}
+          region={region}
+          lora={selectedLora}
+          channelName={channelName}
+          primaryPsk={primaryPskBytes}
+          secondaryVisible={secondaryVisible}
+          secondaryChannelName={secondaryChannelName}
+          secondaryPsk={secondaryPskBytes}
+          telemetry={selectedTelemetry}
+          onConfirm={handleApply}
+          onCancel={handleCancelApply}
         />
       )}
 
@@ -597,54 +594,128 @@ function DeviceInfoPanel({ snapshot }: { snapshot: DeviceSnapshot | null }) {
   );
 }
 
-function PskPromptModal({
-  channelLabel,
-  initialValue,
+const REGION_LABELS: Record<string, string> = { EU_868: "868 MHz", LORA_24: "2.4 GHz" };
+
+function loraSummary(lora: {
+  usePreset: boolean;
+  modemPreset: string;
+  bandwidth: number;
+  spreadFactor: number;
+  codingRate: number;
+}): string {
+  return lora.usePreset ? lora.modemPreset : `BW ${lora.bandwidth}kHz · SF${lora.spreadFactor} · CR4/${lora.codingRate}`;
+}
+
+interface CompareRow {
+  label: string;
+  before: string;
+  after: string;
+}
+
+function ConfirmApplyModal({
+  snapshot,
+  region,
+  lora,
+  channelName,
+  primaryPsk,
+  secondaryVisible,
+  secondaryChannelName,
+  secondaryPsk,
+  telemetry,
   onConfirm,
   onCancel,
 }: {
-  channelLabel: string;
-  initialValue: string;
-  onConfirm: (base64: string) => void;
+  snapshot: DeviceSnapshot | null;
+  region: LoRaRegion;
+  lora: LoRaPresetDef;
+  channelName: string;
+  primaryPsk: Uint8Array;
+  secondaryVisible: boolean;
+  secondaryChannelName: string;
+  secondaryPsk: Uint8Array | null;
+  telemetry: TelemetryPresetDef;
+  onConfirm: () => void;
   onCancel: () => void;
 }) {
-  const [value, setValue] = useState(initialValue);
-  const invalid = decodeCustomPsk(value) === null;
+  const primaryBefore = snapshot?.channels.find((c) => c.role === "PRIMARY");
+  const secondaryBefore = snapshot?.channels.find((c) => c.role === "SECONDARY");
+  const secondaryAfterLabel = secondaryVisible && secondaryPsk !== null ? secondaryChannelName.trim() || "(sin nombre)" : "(ninguno)";
+
+  const rows: CompareRow[] = [
+    {
+      label: "Región",
+      before: snapshot?.lora ? REGION_LABELS[snapshot.lora.region] ?? snapshot.lora.region : "desconocida",
+      after: REGION_LABELS[region] ?? region,
+    },
+    {
+      label: "Preset LoRa",
+      before: snapshot?.lora ? loraSummary(snapshot.lora) : "desconocido",
+      after: lora.label,
+    },
+    {
+      label: "Canal primario",
+      before: primaryBefore ? primaryBefore.name : "desconocido",
+      after: channelName.trim() || "(sin nombre)",
+    },
+    {
+      label: "Cifrado canal primario",
+      before: primaryBefore ? (primaryBefore.encrypted ? "sí" : "no") : "desconocido",
+      after: primaryPsk.length > 0 ? "sí" : "no",
+    },
+    {
+      label: "Canal secundario",
+      before: secondaryBefore ? secondaryBefore.name : "(ninguno)",
+      after: secondaryAfterLabel,
+    },
+    {
+      label: "Telemetría dispositivo",
+      before: snapshot?.telemetry ? formatInterval(snapshot.telemetry.deviceUpdateInterval) : "desconocida",
+      after: formatInterval(telemetry.values.deviceUpdateInterval),
+    },
+    {
+      label: "Telemetría entorno",
+      before: snapshot?.telemetry
+        ? snapshot.telemetry.environmentMeasurementEnabled
+          ? formatInterval(snapshot.telemetry.environmentUpdateInterval)
+          : "desactivada"
+        : "desconocida",
+      after: telemetry.values.environmentMeasurementEnabled
+        ? formatInterval(telemetry.values.environmentUpdateInterval)
+        : "desactivada",
+    },
+  ];
 
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true">
-      <div className="modal">
-        <h3>Clave del canal (PSK)</h3>
+      <div className="modal modal-wide">
+        <h3>¿Seguro que quieres aplicar esta configuración?</h3>
         <p className="hint">
-          Canal: <strong>{channelLabel}</strong>
+          El nodo se reiniciará al terminar. Revisa los cambios antes de continuar.
         </p>
-        <div className="field">
-          <label htmlFor="psk-modal-input">PSK en base64</label>
-          <input
-            id="psk-modal-input"
-            autoFocus
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            placeholder="p.ej. 1PG7OiApB1nwvP+rz05pAQ=="
-          />
-          {invalid ? (
-            <span className="hint warning">
-              Esa clave no es válida: debe ser el texto en base64 tal como lo muestra la app o una URL de canal de
-              Meshtastic (16 o 32 bytes decodificados), no la frase o contraseña del grupo escrita tal cual.
-            </span>
-          ) : (
-            <span className="hint">
-              Ya viene rellenada con la clave estándar de este canal. Déjala así o cámbiala si tu grupo usa una
-              propia. Vacío = sin cifrar.
-            </span>
-          )}
-        </div>
+        <table className="compare-table">
+          <thead>
+            <tr>
+              <th></th>
+              <th>Antes</th>
+              <th>Después</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.label} className={row.before !== row.after ? "changed" : undefined}>
+                <th>{row.label}</th>
+                <td>{row.before}</td>
+                <td>{row.after}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
         <div className="modal-actions">
           <button type="button" className="btn" onClick={onCancel}>
             Cancelar
           </button>
-          <button type="button" className="btn btn-primary" disabled={invalid} onClick={() => onConfirm(value)}>
-            Confirmar
+          <button type="button" className="btn btn-primary" onClick={onConfirm}>
+            Sí, aplicar
           </button>
         </div>
       </div>

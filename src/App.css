@@ -273,22 +273,6 @@
   color: var(--danger);
 }
 
-.psk-summary {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.psk-summary code {
-  font-family: var(--mono);
-  font-size: 0.82rem;
-  color: var(--text);
-  background: var(--panel2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 4px 8px;
-}
-
 .link-button {
   background: none;
   border: none;
@@ -337,6 +321,46 @@
   justify-content: flex-end;
   gap: 10px;
   margin-top: 16px;
+}
+
+.modal-wide {
+  max-width: 560px;
+}
+
+.compare-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 12px;
+  font-size: 0.8rem;
+}
+
+.compare-table th,
+.compare-table td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.compare-table thead th {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.compare-table tbody th {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.compare-table td {
+  color: var(--text);
+}
+
+.compare-table tr.changed td {
+  color: var(--accent);
+  font-weight: 600;
 }
 
 .btn-primary {

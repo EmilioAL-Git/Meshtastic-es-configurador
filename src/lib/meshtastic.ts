@@ -27,7 +27,8 @@ export const defaultSimplePsk = new Uint8Array([1]); // "simple1" — clave púb
  * con el resto de la malla porque tiene otra clave.
  *
  * @returns los bytes de la clave, o `null` si no es base64 válido o la longitud no es
- * una de las que acepta el firmware (0 = sin cifrar, 16 = AES128, 32 = AES256).
+ * una de las que acepta el firmware (0 = sin cifrar, 1 = clave pública "simpleN", 16 =
+ * AES128, 32 = AES256).
  */
 export function decodeCustomPsk(base64: string): Uint8Array | null {
   const trimmed = base64.trim();
@@ -35,7 +36,7 @@ export function decodeCustomPsk(base64: string): Uint8Array | null {
   try {
     const binary = atob(trimmed);
     const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
-    if (bytes.length === 0 || bytes.length === 16 || bytes.length === 32) {
+    if (bytes.length === 0 || bytes.length === 1 || bytes.length === 16 || bytes.length === 32) {
       return bytes;
     }
     return null;

@@ -3,13 +3,32 @@ import { MeshDevice, Protobuf, Types } from "@meshtastic/core";
 import { TransportWebSerial } from "@meshtastic/transport-web-serial";
 import { TransportWebBluetooth } from "@meshtastic/transport-web-bluetooth";
 import { TransportHTTP } from "@meshtastic/transport-http";
-import type { LoRaPresetDef } from "../presets/loraPresets";
+import { ES_CUSTOM_PRESETS, type LoRaPresetDef } from "../presets/loraPresets";
 import type { TelemetryPresetDef } from "../presets/telemetryPresets";
 import type { MessageKey } from "../i18n/locales/es";
 import type { TFunction } from "../i18n";
 
-const { ConfigSchema, Config_LoRaConfigSchema } = Protobuf.Config;
-const { ModuleConfigSchema, ModuleConfig_TelemetryConfigSchema } = Protobuf.ModuleConfig;
+const {
+  ConfigSchema,
+  Config_LoRaConfigSchema,
+  Config_DeviceConfigSchema,
+  Config_DeviceConfig_Role,
+  Config_DeviceConfig_BuzzerMode,
+  Config_PositionConfigSchema,
+  Config_PositionConfig_GpsMode,
+  Config_DisplayConfigSchema,
+  Config_DisplayConfig_DisplayUnits,
+  Config_BluetoothConfigSchema,
+  Config_BluetoothConfig_PairingMode,
+  Config_PowerConfigSchema,
+  Config_NetworkConfigSchema,
+} = Protobuf.Config;
+const {
+  ModuleConfigSchema,
+  ModuleConfig_TelemetryConfigSchema,
+  ModuleConfig_MQTTConfigSchema,
+  ModuleConfig_SerialConfigSchema,
+} = Protobuf.ModuleConfig;
 const { ChannelSchema, ChannelSettingsSchema, Channel_Role } = Protobuf.Channel;
 const { UserSchema } = Protobuf.Mesh;
 const { ChannelSetSchema } = Protobuf.AppOnly;
@@ -90,6 +109,9 @@ const KNOWN_ERROR_TRANSLATIONS: Array<[RegExp, MessageKey]> = [
   [/failed to open/i, "error.failedToOpen"],
   [/^CONFIG_TIMEOUT$/, "error.configTimeout"],
   [/failed to fetch/i, "error.failedToFetch"],
+  [/^APPLY_TIMEOUT$/, "error.applyTimeout"],
+  [/^DEVICE_DISCONNECTED$/, "error.applyTimeout"],
+  [/packet does not exist/i, "error.gattFailed"],
 ];
 
 /** Traduce los mensajes de error habituales de Web Serial/Bluetooth y del SDK al idioma activo; si no reconoce el mensaje, lo deja tal cual. */
@@ -330,6 +352,110 @@ function waitUntilConfigured(device: MeshDevice, timeoutMs = 20000): Promise<voi
   });
 }
 
+/**
+ * Desconecta el dispositivo con un límite de tiempo: `device.disconnect()` cierra los
+ * streams del transporte (serial/BLE/red) y en la práctica a veces se queda colgado
+ * (p.ej. un `close()` de un WritableStream que no resuelve), dejando el botón
+ * "Desconectar" sin efecto visible. Pasado el timeout se asume desconectado igualmente,
+ * ya que a la UI solo le importa volver a "disconnected" cuanto antes.
+ */
+export async function disconnectDevice(device: MeshDevice, timeoutMs = 3000): Promise<void> {
+  await Promise.race([
+    device.disconnect().catch(() => {}),
+    new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
+  ]);
+}
+
+/**
+ * Confirma (persiste) los `setConfig`/`setModuleConfig` enviados desde el último
+ * `beginEditSettings`. La promesa de `commitEditSettings()` espera un ack real del nodo
+ * igual que cualquier paquete de la cola interna del SDK (hasta 60s de timeout) — por
+ * Bluetooth ese ack se pierde a menudo aunque el nodo ya haya aplicado el cambio, dejando
+ * la UI de progreso clavada en el último paso sin motivo. Igual que con
+ * `disconnectDevice`, se le da un margen corto y se continúa aunque no llegue confirmación.
+ */
+async function commitEditSettings(device: MeshDevice, timeoutMs = 5000): Promise<void> {
+  await Promise.race([
+    device.commitEditSettings().catch(() => {}),
+    new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
+  ]);
+}
+
+/**
+ * Igual que `commitEditSettings`: `device.reboot()` también espera un ack real del nodo,
+ * pero aquí ese ack no puede llegar nunca — el nodo se desconecta en cuanto reinicia, así
+ * que esperar su promesa deja la UI clavada en "Reiniciando…" para siempre. Se le da un
+ * margen corto (tiempo de sobra para que el paquete salga por el transporte) y se sigue.
+ */
+async function rebootDevice(device: MeshDevice, delaySeconds = 2, timeoutMs = 5000): Promise<void> {
+  await Promise.race([
+    device.reboot(delaySeconds).catch(() => {}),
+    new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
+  ]);
+}
+
+/**
+ * A diferencia de `commitEditSettings`/`rebootDevice` (best-effort, siguen adelante si no
+ * hay ack), aquí SÍ nos interesa que falle rápido: si el transporte se cae a mitad de
+ * aplicar varios `setConfig`/`setModuleConfig` seguidos (típico al perderse la conexión GATT
+ * por Bluetooth), la promesa del SDK se queda colgada para siempre en vez de rechazar,
+ * dejando la barra de progreso clavada sin ningún error visible.
+ *
+ * Dos salvavidas en paralelo con `run()`:
+ * - Un límite de tiempo total (`APPLY_TIMEOUT`) por si el paso colgado nunca llega a
+ *   rechazar ni el transporte a notificar la desconexión.
+ * - Una escucha de `device.events.onDeviceStatus`: en cuanto el transporte marca
+ *   `DeviceDisconnected` (p.ej. `gattserverdisconnected` de Web Bluetooth), abortamos con
+ *   "DEVICE_DISCONNECTED" al momento — normalmente segundos antes de que el timeout fijo
+ *   salte — en vez de esperar a que expire el margen completo. El único `DeviceDisconnected`
+ *   que NO es un fallo es el que provoca nuestro propio `reboot()` al final de un apply
+ *   satisfactorio: `run()` avisa de que ha llegado a ese punto llamando a `markRebooting()`,
+ *   y a partir de ahí se ignoran los cambios de estado.
+ */
+async function withApplyTimeout<T>(
+  device: MeshDevice,
+  run: (markRebooting: () => void) => Promise<T>,
+  timeoutMs = 45000,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  let rebooting = false;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("APPLY_TIMEOUT")), timeoutMs);
+  });
+  let disconnectReject!: (err: Error) => void;
+  const disconnected = new Promise<never>((_, reject) => {
+    disconnectReject = reject;
+  });
+  const unsubscribe = device.events.onDeviceStatus.subscribe((status) => {
+    if (rebooting) return;
+    if (status === Types.DeviceStatusEnum.DeviceDisconnected) {
+      disconnectReject(new Error("DEVICE_DISCONNECTED"));
+    }
+  });
+  try {
+    return await Promise.race([run(() => (rebooting = true)), timeout, disconnected]);
+  } finally {
+    clearTimeout(timer!);
+    unsubscribe();
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Pausa entre pasos consecutivos de `setConfig`/`setModuleConfig` al aplicar varios seguidos
+ * (presets, "Más configuración", perfiles importados). Sin esta pausa, "Más configuración"
+ * llega a mandar hasta 9-10 escrituras GATT por Bluetooth una detrás de otra sin ningún
+ * margen; eso es justo el patrón que más desestabiliza CoreBluetooth (macOS) y hace que la
+ * conexión se caiga a mitad de aplicar aunque el nodo esté a un metro — no es un problema de
+ * alcance, es de ráfaga. 600ms le da al radio/pila Bluetooth un margen bastante más holgado
+ * para respirar entre paquetes; sigue sin notarse en la duración total salvo cuando de verdad
+ * hay muchos pasos que enviar.
+ */
+const APPLY_STEP_DELAY_MS = 600;
+
 export interface DeviceSnapshotChannel {
   index: number;
   name: string;
@@ -354,6 +480,12 @@ export interface DeviceSnapshotTelemetry {
   deviceUpdateInterval: number;
   environmentMeasurementEnabled: boolean;
   environmentUpdateInterval: number;
+  powerMeasurementEnabled: boolean;
+  powerUpdateInterval: number;
+  airQualityEnabled: boolean;
+  airQualityInterval: number;
+  healthMeasurementEnabled: boolean;
+  healthUpdateInterval: number;
 }
 
 /** Configuración real leída del nodo tras conectar (no lo que se va a aplicar, sino lo que ya tiene). */
@@ -393,6 +525,14 @@ export interface DeviceProfileSource {
   moduleConfig: Protobuf.LocalOnly.LocalModuleConfig;
   /** Canales activos (sin los slots DISABLED), en orden de índice; el [0] es siempre el primario. */
   channels: Protobuf.Channel.Channel[];
+  /**
+   * Posición fija que ya tenga el propio nodo (en grados, no en el entero *1e7 del
+   * protobuf), si en algún momento del handshake ha llegado un paquete Position suyo con
+   * coordenadas. `null` si el nodo no tiene posición fija o si su paquete Position (que solo
+   * se manda si el firmware ya la tiene guardada) no ha llegado a tiempo.
+   */
+  fixedLat: number | null;
+  fixedLon: number | null;
 }
 
 /**
@@ -417,6 +557,8 @@ export function subscribeDeviceSnapshot(
   const rawConfig = create(LocalConfigSchema, {}) as Record<string, unknown>;
   const rawModuleConfig = create(LocalModuleConfigSchema, {}) as Record<string, unknown>;
   let rawChannels: Protobuf.Channel.Channel[] = [];
+  let fixedLat: number | null = null;
+  let fixedLon: number | null = null;
 
   function emit() {
     onUpdate?.({ ...snapshot, channels: [...snapshot.channels] });
@@ -483,6 +625,12 @@ export function subscribeDeviceSnapshot(
             deviceUpdateInterval: t.deviceUpdateInterval,
             environmentMeasurementEnabled: t.environmentMeasurementEnabled,
             environmentUpdateInterval: t.environmentUpdateInterval,
+            powerMeasurementEnabled: t.powerMeasurementEnabled,
+            powerUpdateInterval: t.powerUpdateInterval,
+            airQualityEnabled: t.airQualityEnabled,
+            airQualityInterval: t.airQualityInterval,
+            healthMeasurementEnabled: t.healthMeasurementEnabled,
+            healthUpdateInterval: t.healthUpdateInterval,
           },
         };
       }
@@ -508,6 +656,16 @@ export function subscribeDeviceSnapshot(
       rawChannels.sort((a, b) => a.index - b.index);
       emit();
     }),
+    // Solo llega si el nodo ya tiene una posición fija guardada en firmware; no forma parte
+    // de ninguna sección de Config, así que sin esto "Más configuración" siempre mostraba
+    // las coordenadas vacías aunque el nodo ya tuviera una fijada.
+    device.events.onPositionPacket.subscribe((packet) => {
+      if (myNodeNum === null || packet.from !== myNodeNum) return;
+      const { latitudeI, longitudeI } = packet.data;
+      if (!latitudeI || !longitudeI) return;
+      fixedLat = latitudeI * 1e-7;
+      fixedLon = longitudeI * 1e-7;
+    }),
   ];
   return {
     stop: () => unsubs.forEach((unsub) => unsub()),
@@ -517,26 +675,81 @@ export function subscribeDeviceSnapshot(
       config: { ...rawConfig } as Protobuf.LocalOnly.LocalConfig,
       moduleConfig: { ...rawModuleConfig } as Protobuf.LocalOnly.LocalModuleConfig,
       channels: [...rawChannels],
+      fixedLat,
+      fixedLon,
     }),
   };
+}
+
+/** Rol/GPS/posición recomendados para un tipo de nodo (ver presets/nodeTypePresets.ts); se fusionan en `MoreConfigValues` al elegir el tipo de nodo. */
+export interface NodeTypeMoreConfig {
+  role: Protobuf.Config.Config_DeviceConfig_Role;
+  gpsMode: Protobuf.Config.Config_PositionConfig_GpsMode;
+  positionBroadcastSecs: number;
+  fixedPosition: boolean;
 }
 
 export interface ApplyPresetOptions {
   lora: LoRaPresetDef;
   channel: ChannelPreset;
-  /** Canal secundario opcional (índice 1), p.ej. el canal provincial de la comunidad. */
-  secondaryChannel?: ChannelPreset;
+  /** Canales adicionales (índices 1, 2, 3…), p.ej. el canal provincial de la comunidad. Cualquier canal que el nodo ya tuviera en un índice > 0 que no aparezca aquí se borra (se manda como DISABLED). */
+  additionalChannels?: ChannelPreset[];
   telemetry: TelemetryPresetDef;
   region: Protobuf.Config.Config_LoRaConfig_RegionCode;
+  /**
+   * Perfil crudo actual del nodo. Se usa para preservar el hop limit LoRa (que si no se
+   * reenvía se resetearía a 0) y, si hay `moreConfig`, el resto de secciones ("Más
+   * configuración"/pestaña Avanzado).
+   */
+  source?: DeviceProfileSource;
+  /**
+   * Valores actuales (editados) de "Más configuración" — rol, GPS/posición, pantalla, MQTT,
+   * Bluetooth, red, telemetría detallada... El botón grande de aplicar es el único punto de
+   * entrada para todos los cambios del nodo, así que siempre que hay conexión se envían junto
+   * con LoRa/canal/telemetría en la misma tanda y con un único reinicio.
+   */
+  moreConfig?: MoreConfigValues;
+  /** Valores de `moreConfig` tal como estaban en el nodo al conectar, para saber qué ha editado el usuario (p.ej. si ha tocado la potencia LoRa a mano). */
+  moreConfigBaseline?: MoreConfigValues;
   onProgress?: ProgressFn;
 }
 
-/** Aplica LoRa + canal primario + intervalos de telemetría a un nodo ya conectado, y reinicia. */
+/**
+ * Aplica LoRa + canal primario/secundario + intervalos de telemetría, y si se pasa
+ * `moreConfig`, también el resto de secciones ("Más configuración"/pestaña Avanzado) que
+ * el usuario haya editado. Es el único punto de entrada de "Aplicar" de la app: todo se
+ * envía en una sola tanda con un único reinicio al final.
+ */
 export async function applyPreset(device: MeshDevice, t: TFunction, opts: ApplyPresetOptions): Promise<void> {
+  await withApplyTimeout(device, (markRebooting) => applyPresetInner(device, t, opts, markRebooting));
+}
+
+async function applyPresetInner(
+  device: MeshDevice,
+  t: TFunction,
+  opts: ApplyPresetOptions,
+  markRebooting: () => void,
+): Promise<void> {
   const { region, onProgress } = opts;
 
   onProgress?.(t("progress.sendingLora"), { percent: 5 });
+  // Potencia de transmisión: 0 = automático (el firmware calcula el máximo permitido por
+  // región). En 868 MHz predeterminamos a 23 dBm (máximo habitual permitido en la banda
+  // ISM europea); en 2.4 GHz dejamos el automático del firmware (10 dBm), que ya es el
+  // límite recomendado para esa banda y no debe subirse. Si el usuario ha tocado a mano la
+  // potencia en "Más configuración" (pestaña Avanzado), esa edición manda sobre el valor por
+  // región.
+  const computedTxPower = region === Protobuf.Config.Config_LoRaConfig_RegionCode.EU_868 ? 23 : 0;
+  const txPowerEdited =
+    opts.moreConfig !== undefined && opts.moreConfigBaseline !== undefined && opts.moreConfig.txPower !== opts.moreConfigBaseline.txPower;
+  const txPower = txPowerEdited ? opts.moreConfig!.txPower : computedTxPower;
+  // setConfig reemplaza toda la sección LoRa: partimos del resto de campos que ya tenía el
+  // nodo (ignoreMqtt/configOkToMqtt, femLnaMode...) para no resetearlos a su valor por
+  // defecto, y solo sobrescribimos los que controla el preset. El hop limit se toma de "Más
+  // configuración" si está disponible (se inicializa con el valor real del nodo, así que
+  // reenviarlo sin más no lo resetea) y si no, se preserva vía el spread de arriba.
   const loraConfig = create(Config_LoRaConfigSchema, {
+    ...opts.source?.config.lora,
     usePreset: opts.lora.values.usePreset,
     modemPreset: opts.lora.values.modemPreset,
     bandwidth: opts.lora.values.bandwidth ?? 0,
@@ -545,45 +758,512 @@ export async function applyPreset(device: MeshDevice, t: TFunction, opts: ApplyP
     channelNum: opts.lora.channelNum ?? 0,
     overrideFrequency: opts.lora.values.overrideFrequency ?? 0,
     region,
+    txPower,
+    ...(opts.moreConfig ? { hopLimit: opts.moreConfig.hopLimit } : {}),
     txEnabled: true,
   });
   await device.setConfig(
     create(ConfigSchema, { payloadVariant: { case: "lora", value: loraConfig } }),
   );
 
+  // setChannel reemplaza toda la sección de canal: partimos de la que ya tenía el nodo en ese
+  // índice para no resetear moduleSettings (precisión de posición, silenciado) a sus valores
+  // por defecto. El canal primario siempre lleva uplink/downlink MQTT activados.
+  const existingPrimary = opts.source?.channels.find((c) => c.index === 0)?.settings;
+  await sleep(APPLY_STEP_DELAY_MS);
   onProgress?.(t("progress.sendingPrimaryChannel"), { percent: 30 });
   const channelSettings = create(ChannelSettingsSchema, {
+    ...existingPrimary,
     name: opts.channel.name,
     psk: opts.channel.psk,
+    uplinkEnabled: true,
+    downlinkEnabled: true,
   });
   await device.setChannel(
     create(ChannelSchema, { index: 0, role: Channel_Role.PRIMARY, settings: channelSettings }),
   );
 
-  if (opts.secondaryChannel) {
-    onProgress?.(t("progress.sendingSecondaryChannel"), { percent: 45 });
-    const secondarySettings = create(ChannelSettingsSchema, {
-      name: opts.secondaryChannel.name,
-      psk: opts.secondaryChannel.psk,
+  const additionalChannels = opts.additionalChannels ?? [];
+  for (const [i, additional] of additionalChannels.entries()) {
+    const index = i + 1;
+    const existingChannel = opts.source?.channels.find((c) => c.index === index)?.settings;
+    await sleep(APPLY_STEP_DELAY_MS);
+    onProgress?.(t("progress.sendingSecondaryChannel"), { percent: 45 + i * 3 });
+    const additionalSettings = create(ChannelSettingsSchema, {
+      ...existingChannel,
+      name: additional.name,
+      psk: additional.psk,
     });
     await device.setChannel(
-      create(ChannelSchema, { index: 1, role: Channel_Role.SECONDARY, settings: secondarySettings }),
+      create(ChannelSchema, { index, role: Channel_Role.SECONDARY, settings: additionalSettings }),
+    );
+  }
+  // Cualquier canal (índice > 0) que el nodo ya tuviera y ya no esté en additionalChannels
+  // lo ha borrado el usuario: hay que mandarlo como DISABLED explícitamente, si no
+  // setChannel de los demás índices no lo tocaría y seguiría activo en el nodo.
+  const keptIndices = new Set(additionalChannels.map((_, i) => i + 1));
+  const removedChannels = (opts.source?.channels ?? []).filter((c) => c.index > 0 && !keptIndices.has(c.index));
+  for (const removed of removedChannels) {
+    await sleep(APPLY_STEP_DELAY_MS);
+    await device.setChannel(
+      create(ChannelSchema, { index: removed.index, role: Channel_Role.DISABLED, settings: create(ChannelSettingsSchema, {}) }),
     );
   }
 
+  await sleep(APPLY_STEP_DELAY_MS);
   onProgress?.(t("progress.sendingTelemetry"), { percent: 55 });
+  // setModuleConfig reemplaza toda la sección de telemetría: sin este spread, campos que no
+  // gestiona el preset (sobre todo `deviceTelemetryEnabled`, que controla si se envía
+  // telemetría de dispositivo a la malla) se reseteaban a `false` en cada aplicación.
   const telemetryConfig = create(ModuleConfig_TelemetryConfigSchema, {
+    ...opts.source?.moduleConfig.telemetry,
     deviceUpdateInterval: opts.telemetry.values.deviceUpdateInterval,
     environmentUpdateInterval: opts.telemetry.values.environmentUpdateInterval,
     environmentMeasurementEnabled: opts.telemetry.values.environmentMeasurementEnabled,
+    powerUpdateInterval: opts.telemetry.values.powerUpdateInterval,
+    powerMeasurementEnabled: opts.telemetry.values.powerMeasurementEnabled,
+    airQualityInterval: opts.telemetry.values.airQualityInterval,
+    airQualityEnabled: opts.telemetry.values.airQualityEnabled,
+    healthUpdateInterval: opts.telemetry.values.healthUpdateInterval,
+    healthMeasurementEnabled: opts.telemetry.values.healthMeasurementEnabled,
   });
   await device.setModuleConfig(
     create(ModuleConfigSchema, { payloadVariant: { case: "telemetry", value: telemetryConfig } }),
   );
 
-  onProgress?.(t("progress.rebooting"), { percent: 80 });
-  await device.reboot(2);
+  if (opts.moreConfig && opts.source) {
+    await sendMoreConfigExtraSections(
+      device,
+      t,
+      opts.source,
+      opts.moreConfig,
+      opts.moreConfigBaseline ?? readMoreConfigValues(opts.source),
+      onProgress,
+    );
+  }
+
+  await sleep(APPLY_STEP_DELAY_MS);
+  markRebooting();
+  await commitEditSettings(device);
+  onProgress?.(t("progress.rebooting"), { percent: 96 });
+  await rebootDevice(device);
   onProgress?.(t("progress.applied"), { percent: 100 });
+}
+
+export type DeviceRole = Protobuf.Config.Config_DeviceConfig_Role;
+export type GpsMode = Protobuf.Config.Config_PositionConfig_GpsMode;
+export type DisplayUnits = Protobuf.Config.Config_DisplayConfig_DisplayUnits;
+export type BluetoothPairingMode = Protobuf.Config.Config_BluetoothConfig_PairingMode;
+
+// Reexportados (en vez de los enums del protobuf directamente) para que otros módulos
+// (p.ej. presets/nodeTypePresets.ts) puedan construir valores de MoreConfigValues sin
+// importar @meshtastic/core.
+export const DeviceRoleValue = Config_DeviceConfig_Role;
+export const GpsModeValue = Config_PositionConfig_GpsMode;
+export const BluetoothPairingModeValue = Config_BluetoothConfig_PairingMode;
+
+// Roles no obsoletos del firmware; se omiten ROUTER_CLIENT y REPEATER (deprecated).
+// CLIENT_BASE (rol 12 en firmware reciente) no existe todavía en el enum que trae
+// empaquetado @meshtastic/core 2.6.7 (se queda en 0-11) aunque sus tipos lo declaren:
+// usarlo aquí produciría un valor `undefined` en tiempo de ejecución.
+export const DEVICE_ROLE_OPTIONS: { value: DeviceRole; labelKey: MessageKey }[] = [
+  { value: Config_DeviceConfig_Role.CLIENT, labelKey: "moreConfig.role.client" },
+  { value: Config_DeviceConfig_Role.CLIENT_MUTE, labelKey: "moreConfig.role.clientMute" },
+  { value: Config_DeviceConfig_Role.CLIENT_HIDDEN, labelKey: "moreConfig.role.clientHidden" },
+  { value: Config_DeviceConfig_Role.ROUTER, labelKey: "moreConfig.role.router" },
+  { value: Config_DeviceConfig_Role.ROUTER_LATE, labelKey: "moreConfig.role.routerLate" },
+  { value: Config_DeviceConfig_Role.TRACKER, labelKey: "moreConfig.role.tracker" },
+  { value: Config_DeviceConfig_Role.SENSOR, labelKey: "moreConfig.role.sensor" },
+  { value: Config_DeviceConfig_Role.LOST_AND_FOUND, labelKey: "moreConfig.role.lostAndFound" },
+  { value: Config_DeviceConfig_Role.TAK, labelKey: "moreConfig.role.tak" },
+  { value: Config_DeviceConfig_Role.TAK_TRACKER, labelKey: "moreConfig.role.takTracker" },
+];
+
+export const GPS_MODE_OPTIONS: { value: GpsMode; labelKey: MessageKey }[] = [
+  { value: Config_PositionConfig_GpsMode.ENABLED, labelKey: "moreConfig.gpsMode.enabled" },
+  { value: Config_PositionConfig_GpsMode.DISABLED, labelKey: "moreConfig.gpsMode.disabled" },
+  { value: Config_PositionConfig_GpsMode.NOT_PRESENT, labelKey: "moreConfig.gpsMode.notPresent" },
+];
+
+export const DISPLAY_UNITS_OPTIONS: { value: DisplayUnits; labelKey: MessageKey }[] = [
+  { value: Config_DisplayConfig_DisplayUnits.METRIC, labelKey: "moreConfig.displayUnits.metric" },
+  { value: Config_DisplayConfig_DisplayUnits.IMPERIAL, labelKey: "moreConfig.displayUnits.imperial" },
+];
+
+export const BLUETOOTH_PAIRING_MODE_OPTIONS: { value: BluetoothPairingMode; labelKey: MessageKey }[] = [
+  { value: Config_BluetoothConfig_PairingMode.RANDOM_PIN, labelKey: "moreConfig.bluetoothMode.randomPin" },
+  { value: Config_BluetoothConfig_PairingMode.FIXED_PIN, labelKey: "moreConfig.bluetoothMode.fixedPin" },
+  { value: Config_BluetoothConfig_PairingMode.NO_PIN, labelKey: "moreConfig.bluetoothMode.noPin" },
+];
+
+export type BuzzerMode = Protobuf.Config.Config_DeviceConfig_BuzzerMode;
+export const BuzzerModeValue = Config_DeviceConfig_BuzzerMode;
+
+export const BUZZER_MODE_OPTIONS: { value: BuzzerMode; labelKey: MessageKey }[] = [
+  { value: Config_DeviceConfig_BuzzerMode.ALL_ENABLED, labelKey: "moreConfig.buzzerMode.allEnabled" },
+  { value: Config_DeviceConfig_BuzzerMode.NOTIFICATIONS_ONLY, labelKey: "moreConfig.buzzerMode.notificationsOnly" },
+  { value: Config_DeviceConfig_BuzzerMode.SYSTEM_ONLY, labelKey: "moreConfig.buzzerMode.systemOnly" },
+  { value: Config_DeviceConfig_BuzzerMode.DISABLED, labelKey: "moreConfig.buzzerMode.disabled" },
+];
+
+export interface MoreConfigValues {
+  role: DeviceRole;
+  txPower: number;
+  hopLimit: number;
+  gpsMode: GpsMode;
+  positionBroadcastSecs: number;
+  fixedPosition: boolean;
+  /** Coordenadas a fijar cuando `fixedPosition` está activo (elegidas a mano o en el mapa); `null` si aún no se han fijado desde el configurador. */
+  fixedLat: number | null;
+  fixedLon: number | null;
+  displayUnits: DisplayUnits;
+  screenOnSecs: number;
+  flipScreen: boolean;
+  mqttEnabled: boolean;
+  mqttAddress: string;
+  mqttUsername: string;
+  mqttPassword: string;
+  mqttEncryptionEnabled: boolean;
+  mqttTlsEnabled: boolean;
+  mqttRoot: string;
+  bluetoothEnabled: boolean;
+  bluetoothMode: BluetoothPairingMode;
+  bluetoothFixedPin: number;
+  powerSavingEnabled: boolean;
+  onBatteryShutdownAfterSecs: number;
+  tzdef: string;
+  buzzerMode: BuzzerMode;
+  ledHeartbeatDisabled: boolean;
+  networkWifiEnabled: boolean;
+  networkWifiSsid: string;
+  networkWifiPsk: string;
+  networkEthEnabled: boolean;
+  serialEnabled: boolean;
+  telemetryDeviceUpdateInterval: number;
+  telemetryEnvironmentMeasurementEnabled: boolean;
+  telemetryEnvironmentUpdateInterval: number;
+  telemetryEnvironmentScreenEnabled: boolean;
+  telemetryEnvironmentDisplayFahrenheit: boolean;
+  telemetryAirQualityEnabled: boolean;
+  telemetryAirQualityInterval: number;
+  telemetryPowerMeasurementEnabled: boolean;
+  telemetryPowerUpdateInterval: number;
+  telemetryPowerScreenEnabled: boolean;
+  telemetryHealthMeasurementEnabled: boolean;
+  telemetryHealthUpdateInterval: number;
+  telemetryHealthScreenEnabled: boolean;
+}
+
+/** Lee los valores actuales de las secciones cubiertas por "Más configuración" desde el perfil crudo del nodo. */
+export function readMoreConfigValues(source: DeviceProfileSource): MoreConfigValues {
+  const { device, position, display, lora, bluetooth, power, network } = source.config;
+  const { mqtt, serial, telemetry } = source.moduleConfig;
+  return {
+    role: device?.role ?? Config_DeviceConfig_Role.CLIENT,
+    txPower: lora?.txPower ?? 0,
+    hopLimit: lora?.hopLimit ?? 3,
+    gpsMode: position?.gpsMode ?? Config_PositionConfig_GpsMode.NOT_PRESENT,
+    positionBroadcastSecs: position?.positionBroadcastSecs ?? 900,
+    fixedPosition: position?.fixedPosition ?? false,
+    // Config_PositionConfig no trae latitud/longitud (viven en el mensaje Position, que solo
+    // llega si el nodo ya tiene una posición fija guardada — ver el onPositionPacket de
+    // subscribeDeviceSnapshot). Si no ha llegado ninguno, se queda en null y el usuario
+    // simplemente no ve coordenadas previas hasta que fije unas nuevas.
+    fixedLat: source.fixedLat,
+    fixedLon: source.fixedLon,
+    displayUnits: display?.units ?? Config_DisplayConfig_DisplayUnits.METRIC,
+    screenOnSecs: display?.screenOnSecs ?? 0,
+    flipScreen: display?.flipScreen ?? false,
+    mqttEnabled: mqtt?.enabled ?? false,
+    mqttAddress: mqtt?.address ?? "",
+    mqttUsername: mqtt?.username ?? "",
+    mqttPassword: mqtt?.password ?? "",
+    mqttEncryptionEnabled: mqtt?.encryptionEnabled ?? true,
+    mqttTlsEnabled: mqtt?.tlsEnabled ?? false,
+    mqttRoot: mqtt?.root ?? "",
+    bluetoothEnabled: bluetooth?.enabled ?? true,
+    bluetoothMode: bluetooth?.mode ?? Config_BluetoothConfig_PairingMode.RANDOM_PIN,
+    bluetoothFixedPin: bluetooth?.fixedPin ?? 123456,
+    powerSavingEnabled: power?.isPowerSaving ?? false,
+    onBatteryShutdownAfterSecs: power?.onBatteryShutdownAfterSecs ?? 0,
+    tzdef: device?.tzdef ?? "",
+    buzzerMode: device?.buzzerMode ?? Config_DeviceConfig_BuzzerMode.ALL_ENABLED,
+    ledHeartbeatDisabled: device?.ledHeartbeatDisabled ?? false,
+    networkWifiEnabled: network?.wifiEnabled ?? false,
+    networkWifiSsid: network?.wifiSsid ?? "",
+    networkWifiPsk: network?.wifiPsk ?? "",
+    networkEthEnabled: network?.ethEnabled ?? false,
+    serialEnabled: serial?.enabled ?? false,
+    telemetryDeviceUpdateInterval: telemetry?.deviceUpdateInterval ?? 0,
+    telemetryEnvironmentMeasurementEnabled: telemetry?.environmentMeasurementEnabled ?? false,
+    telemetryEnvironmentUpdateInterval: telemetry?.environmentUpdateInterval ?? 0,
+    telemetryEnvironmentScreenEnabled: telemetry?.environmentScreenEnabled ?? false,
+    telemetryEnvironmentDisplayFahrenheit: telemetry?.environmentDisplayFahrenheit ?? false,
+    telemetryAirQualityEnabled: telemetry?.airQualityEnabled ?? false,
+    telemetryAirQualityInterval: telemetry?.airQualityInterval ?? 0,
+    telemetryPowerMeasurementEnabled: telemetry?.powerMeasurementEnabled ?? false,
+    telemetryPowerUpdateInterval: telemetry?.powerUpdateInterval ?? 0,
+    telemetryPowerScreenEnabled: telemetry?.powerScreenEnabled ?? false,
+    telemetryHealthMeasurementEnabled: telemetry?.healthMeasurementEnabled ?? false,
+    telemetryHealthUpdateInterval: telemetry?.healthUpdateInterval ?? 0,
+    telemetryHealthScreenEnabled: telemetry?.healthScreenEnabled ?? false,
+  };
+}
+
+function moreConfigSectionChanged<K extends keyof MoreConfigValues>(
+  values: MoreConfigValues,
+  baseline: MoreConfigValues,
+  keys: readonly K[],
+): boolean {
+  return keys.some((key) => values[key] !== baseline[key]);
+}
+
+/**
+ * Envía el resto de secciones de "Más configuración" (todo lo que no sea LoRa/canal/
+ * telemetría del preset, que ya gestiona `applyPresetInner`): rol del nodo, posición/GPS,
+ * pantalla, MQTT, Bluetooth, energía, red, serie y telemetría detallada. `values` siempre
+ * trae los 40+ campos del formulario, pero eso no significa que el usuario haya tocado
+ * todos: reenviar una sección entera sin cambios (p.ej. MQTT, con 4 campos de texto) es una
+ * escritura GATT innecesaria más — y por Bluetooth cada escritura de más es una oportunidad
+ * más para que la conexión se caiga a mitad de aplicar. Comparando contra `baseline` (los
+ * valores tal como se leyeron del nodo al conectar) nos saltamos por completo cualquier
+ * sección idéntica.
+ */
+async function sendMoreConfigExtraSections(
+  device: MeshDevice,
+  t: TFunction,
+  source: DeviceProfileSource,
+  values: MoreConfigValues,
+  baseline: MoreConfigValues,
+  onProgress: ProgressFn | undefined,
+): Promise<void> {
+  const paced = async (run: () => Promise<void>) => {
+    await sleep(APPLY_STEP_DELAY_MS);
+    await run();
+  };
+
+  if (moreConfigSectionChanged(values, baseline, ["role", "tzdef", "buzzerMode", "ledHeartbeatDisabled"])) {
+    await paced(async () => {
+      onProgress?.(t("progress.sendingConfigSection", { section: t("configSection.device") }), { percent: 60 });
+      await device.setConfig(
+        create(ConfigSchema, {
+          payloadVariant: {
+            case: "device",
+            value: create(Config_DeviceConfigSchema, {
+              ...source.config.device,
+              role: values.role,
+              tzdef: values.tzdef,
+              buzzerMode: values.buzzerMode,
+              ledHeartbeatDisabled: values.ledHeartbeatDisabled,
+            }),
+          },
+        }),
+      );
+    });
+  }
+
+  if (moreConfigSectionChanged(values, baseline, ["gpsMode", "positionBroadcastSecs", "fixedPosition"])) {
+    await paced(async () => {
+      onProgress?.(t("progress.sendingConfigSection", { section: t("configSection.position") }), { percent: 64 });
+      await device.setConfig(
+        create(ConfigSchema, {
+          payloadVariant: {
+            case: "position",
+            value: create(Config_PositionConfigSchema, {
+              ...source.config.position,
+              gpsMode: values.gpsMode,
+              positionBroadcastSecs: values.positionBroadcastSecs,
+              fixedPosition: values.fixedPosition,
+            }),
+          },
+        }),
+      );
+    });
+  }
+
+  // fixedPosition (arriba) solo dice "esta posición no se mueve"; las coordenadas en sí se
+  // fijan aparte con un mensaje admin (setFixedPosition), no forman parte de Config. Solo se
+  // toca si el usuario ha marcado coordenadas nuevas, o si estaba fija y ha dejado de estarlo.
+  if (values.fixedPosition && values.fixedLat !== null && values.fixedLon !== null) {
+    await paced(async () => {
+      onProgress?.(t("progress.sendingFixedPosition"), { percent: 67 });
+      await device.setFixedPosition(values.fixedLat!, values.fixedLon!);
+    });
+  } else if (!values.fixedPosition && baseline.fixedPosition) {
+    await paced(async () => {
+      await device.removeFixedPosition();
+    });
+  }
+
+  if (moreConfigSectionChanged(values, baseline, ["displayUnits", "screenOnSecs", "flipScreen"])) {
+    await paced(async () => {
+      onProgress?.(t("progress.sendingConfigSection", { section: t("configSection.display") }), { percent: 70 });
+      await device.setConfig(
+        create(ConfigSchema, {
+          payloadVariant: {
+            case: "display",
+            value: create(Config_DisplayConfigSchema, {
+              ...source.config.display,
+              units: values.displayUnits,
+              screenOnSecs: values.screenOnSecs,
+              flipScreen: values.flipScreen,
+            }),
+          },
+        }),
+      );
+    });
+  }
+
+  if (
+    moreConfigSectionChanged(values, baseline, [
+      "mqttEnabled",
+      "mqttAddress",
+      "mqttUsername",
+      "mqttPassword",
+      "mqttEncryptionEnabled",
+      "mqttTlsEnabled",
+      "mqttRoot",
+    ])
+  ) {
+    await paced(async () => {
+      onProgress?.(t("progress.sendingModuleConfigSection", { section: t("moduleSection.mqtt") }), { percent: 74 });
+      await device.setModuleConfig(
+        create(ModuleConfigSchema, {
+          payloadVariant: {
+            case: "mqtt",
+            value: create(ModuleConfig_MQTTConfigSchema, {
+              ...source.moduleConfig.mqtt,
+              enabled: values.mqttEnabled,
+              address: values.mqttAddress,
+              username: values.mqttUsername,
+              password: values.mqttPassword,
+              encryptionEnabled: values.mqttEncryptionEnabled,
+              tlsEnabled: values.mqttTlsEnabled,
+              root: values.mqttRoot,
+            }),
+          },
+        }),
+      );
+    });
+  }
+
+  if (moreConfigSectionChanged(values, baseline, ["bluetoothEnabled", "bluetoothMode", "bluetoothFixedPin"])) {
+    await paced(async () => {
+      onProgress?.(t("progress.sendingConfigSection", { section: t("configSection.bluetooth") }), { percent: 78 });
+      await device.setConfig(
+        create(ConfigSchema, {
+          payloadVariant: {
+            case: "bluetooth",
+            value: create(Config_BluetoothConfigSchema, {
+              ...source.config.bluetooth,
+              enabled: values.bluetoothEnabled,
+              mode: values.bluetoothMode,
+              fixedPin: values.bluetoothFixedPin,
+            }),
+          },
+        }),
+      );
+    });
+  }
+
+  if (moreConfigSectionChanged(values, baseline, ["powerSavingEnabled", "onBatteryShutdownAfterSecs"])) {
+    await paced(async () => {
+      onProgress?.(t("progress.sendingConfigSection", { section: t("configSection.power") }), { percent: 82 });
+      await device.setConfig(
+        create(ConfigSchema, {
+          payloadVariant: {
+            case: "power",
+            value: create(Config_PowerConfigSchema, {
+              ...source.config.power,
+              isPowerSaving: values.powerSavingEnabled,
+              onBatteryShutdownAfterSecs: values.onBatteryShutdownAfterSecs,
+            }),
+          },
+        }),
+      );
+    });
+  }
+
+  if (
+    moreConfigSectionChanged(values, baseline, ["networkWifiEnabled", "networkWifiSsid", "networkWifiPsk", "networkEthEnabled"])
+  ) {
+    await paced(async () => {
+      onProgress?.(t("progress.sendingConfigSection", { section: t("configSection.network") }), { percent: 85 });
+      await device.setConfig(
+        create(ConfigSchema, {
+          payloadVariant: {
+            case: "network",
+            value: create(Config_NetworkConfigSchema, {
+              ...source.config.network,
+              wifiEnabled: values.networkWifiEnabled,
+              wifiSsid: values.networkWifiSsid,
+              wifiPsk: values.networkWifiPsk,
+              ethEnabled: values.networkEthEnabled,
+            }),
+          },
+        }),
+      );
+    });
+  }
+
+  if (moreConfigSectionChanged(values, baseline, ["serialEnabled"])) {
+    await paced(async () => {
+      onProgress?.(t("progress.sendingModuleConfigSection", { section: t("moduleSection.serial") }), { percent: 88 });
+      await device.setModuleConfig(
+        create(ModuleConfigSchema, {
+          payloadVariant: {
+            case: "serial",
+            value: create(ModuleConfig_SerialConfigSchema, { ...source.moduleConfig.serial, enabled: values.serialEnabled }),
+          },
+        }),
+      );
+    });
+  }
+
+  if (
+    moreConfigSectionChanged(values, baseline, [
+      "telemetryDeviceUpdateInterval",
+      "telemetryEnvironmentMeasurementEnabled",
+      "telemetryEnvironmentUpdateInterval",
+      "telemetryEnvironmentScreenEnabled",
+      "telemetryEnvironmentDisplayFahrenheit",
+      "telemetryAirQualityEnabled",
+      "telemetryAirQualityInterval",
+      "telemetryPowerMeasurementEnabled",
+      "telemetryPowerUpdateInterval",
+      "telemetryPowerScreenEnabled",
+      "telemetryHealthMeasurementEnabled",
+      "telemetryHealthUpdateInterval",
+      "telemetryHealthScreenEnabled",
+    ])
+  ) {
+    await paced(async () => {
+      onProgress?.(t("progress.sendingModuleConfigSection", { section: t("moduleSection.telemetry") }), { percent: 92 });
+      await device.setModuleConfig(
+        create(ModuleConfigSchema, {
+          payloadVariant: {
+            case: "telemetry",
+            value: create(ModuleConfig_TelemetryConfigSchema, {
+              ...source.moduleConfig.telemetry,
+              deviceUpdateInterval: values.telemetryDeviceUpdateInterval,
+              environmentMeasurementEnabled: values.telemetryEnvironmentMeasurementEnabled,
+              environmentUpdateInterval: values.telemetryEnvironmentUpdateInterval,
+              environmentScreenEnabled: values.telemetryEnvironmentScreenEnabled,
+              environmentDisplayFahrenheit: values.telemetryEnvironmentDisplayFahrenheit,
+              airQualityEnabled: values.telemetryAirQualityEnabled,
+              airQualityInterval: values.telemetryAirQualityInterval,
+              powerMeasurementEnabled: values.telemetryPowerMeasurementEnabled,
+              powerUpdateInterval: values.telemetryPowerUpdateInterval,
+              powerScreenEnabled: values.telemetryPowerScreenEnabled,
+              healthMeasurementEnabled: values.telemetryHealthMeasurementEnabled,
+              healthUpdateInterval: values.telemetryHealthUpdateInterval,
+              healthScreenEnabled: values.telemetryHealthScreenEnabled,
+            }),
+          },
+        }),
+      );
+    });
+  }
 }
 
 const CHANNEL_URL_PREFIX = "https://meshtastic.org/e/#";
@@ -611,31 +1291,72 @@ function parseChannelUrl(channelUrl: string): Protobuf.AppOnly.ChannelSet {
 }
 
 /**
- * Exporta toda la configuración que ya conocemos del nodo conectado (identidad y todas
- * las secciones de Config/ModuleConfig recibidas durante el handshake, más los canales)
- * como un `DeviceProfile` en JSON — el mismo formato que usan "Exportar
- * configuración"/"Importar configuración" en la app oficial de Meshtastic.
+ * Construye el `DeviceProfile` (mismo formato que "Exportar configuración"/"Importar
+ * configuración") a partir de la foto cruda del nodo conectado. La clave privada
+ * (Config.security.private_key) nunca sale de él: es el secreto que le da su identidad
+ * criptográfica en la malla. Si se filtra en un fichero y se reimporta en otro nodo,
+ * ambos acabarían compartiendo identidad. La app oficial hace lo mismo al exportar.
  */
-export function exportDeviceProfileJson(source: DeviceProfileSource): string {
-  // La clave privada del nodo (Config.security.private_key) nunca debe salir de él: es
-  // el secreto que le da su identidad criptográfica en la malla. Si se filtra en un
-  // fichero y se reimporta en otro nodo, ambos acabarían compartiendo identidad. La app
-  // oficial hace lo mismo al exportar.
+function buildDeviceProfile(source: DeviceProfileSource): DeviceProfile {
   const config = source.config.security
     ? { ...source.config, security: { ...source.config.security, privateKey: new Uint8Array() } }
     : source.config;
 
-  const profile = create(DeviceProfileSchema, {
+  return create(DeviceProfileSchema, {
     longName: source.longName ?? undefined,
     shortName: source.shortName ?? undefined,
     channelUrl: source.channels.length > 0 ? buildChannelUrl(source.channels, source.config.lora ?? null) : undefined,
     config: create(LocalConfigSchema, config),
     moduleConfig: create(LocalModuleConfigSchema, source.moduleConfig),
   });
+}
+
+/**
+ * Exporta toda la configuración que ya conocemos del nodo conectado (identidad y todas
+ * las secciones de Config/ModuleConfig recibidas durante el handshake, más los canales)
+ * como un `DeviceProfile` en JSON — el mismo formato que usan "Exportar
+ * configuración"/"Importar configuración" en la app oficial de Meshtastic.
+ */
+export function exportDeviceProfileJson(source: DeviceProfileSource): string {
+  const profile = buildDeviceProfile(source);
   // alwaysEmitImplicit: sin esto, protobuf-JSON omite los campos que están en su valor
   // por defecto (false, 0, "") — p.ej. "usePreset": false desaparecería del todo del
   // fichero en vez de aparecer explícito, aunque el nodo sí lo tenga así.
   return JSON.stringify(toJson(DeviceProfileSchema, profile, { alwaysEmitImplicit: true }), null, 2);
+}
+
+/**
+ * Traduce la configuración actual de un nodo ya conectado a las mismas secciones legibles
+ * que se usan para revisar un perfil importado (`describeDeviceProfile`), para mostrarlas
+ * en el panel "Configuración actual del nodo". Añade además las coordenadas de posición
+ * fija si se conocen: no forman parte de ninguna sección de Config (viven en un paquete
+ * Position aparte, ver `fixedLat`/`fixedLon` en `DeviceProfileSource`), así que
+ * `describeDeviceProfile` no las incluye por sí solo.
+ */
+// Secciones que describeDeviceProfile sí incluye (tienen sentido al revisar un fichero
+// antes de importarlo) pero que aquí solo añaden ruido: energía/pantalla son ajustes
+// menores de comodidad, y "otros módulos" solo indica qué secciones mandó el firmware en
+// el handshake, no si el módulo está realmente activo, así que sistemáticamente confunde
+// más de lo que informa.
+const CURRENT_PROFILE_HIDDEN_SECTION_KEYS: MessageKey[] = [
+  "profile.power.title",
+  "profile.display.title",
+  "profile.externalNotification.title",
+  "profile.cannedMessage.title",
+  "profile.otherModules.title",
+];
+
+export function describeCurrentDeviceProfile(source: DeviceProfileSource, t: TFunction): ProfileSummarySection[] {
+  const sections = describeDeviceProfile(buildDeviceProfile(source), t);
+  if (source.fixedLat !== null && source.fixedLon !== null) {
+    const positionSection = sections.find((s) => s.title === t("profile.position.title"));
+    positionSection?.rows.push({
+      label: t("profile.position.coords"),
+      value: `${source.fixedLat.toFixed(6)}, ${source.fixedLon.toFixed(6)}`,
+    });
+  }
+  const hiddenTitles = new Set(CURRENT_PROFILE_HIDDEN_SECTION_KEYS.map((key) => t(key)));
+  return sections.filter((s) => !hiddenTitles.has(s.title));
 }
 
 /** Descarga `content` como fichero en el navegador (usado para guardar el JSON exportado). */
@@ -745,6 +1466,18 @@ export interface ProfileSummarySection {
 }
 
 /**
+ * Si una config LoRa manual (usePreset=false) coincide con un preset propio de la
+ * comunidad (BW/SF/CR, ver `presets/loraPresets.ts`), devuelve su nombre ("SFNarrow"...) en
+ * vez de que el resumen muestre los números crudos, que no dicen nada al usuario.
+ */
+function customLoraPresetName(l: { bandwidth: number; spreadFactor: number; codingRate: number }): string | null {
+  const match = ES_CUSTOM_PRESETS.find(
+    (p) => p.values.bandwidth === l.bandwidth && p.values.spreadFactor === l.spreadFactor && p.values.codingRate === l.codingRate,
+  );
+  return match?.defaultChannelName ?? null;
+}
+
+/**
  * Traduce un `DeviceProfile` importado a una lista de secciones con etiquetas y valores
  * en español, listos para mostrar a un usuario final sin que tenga que interpretar
  * nombres de campos ni enums del protobuf. Solo incluye las secciones presentes en el
@@ -789,7 +1522,7 @@ export function describeDeviceProfile(profile: DeviceProfile, t: TFunction): Pro
           label: t("profile.lora.mode"),
           value: l.usePreset
             ? Protobuf.Config.Config_LoRaConfig_ModemPreset[l.modemPreset] ?? String(l.modemPreset)
-            : t("profile.lora.manual", { bw: l.bandwidth, sf: l.spreadFactor, cr: l.codingRate }),
+            : (customLoraPresetName(l) ?? t("profile.lora.manual", { bw: l.bandwidth, sf: l.spreadFactor, cr: l.codingRate })),
         },
         ...(l.overrideFrequency ? [{ label: t("profile.lora.fixedFreq"), value: `${l.overrideFrequency.toFixed(3)} MHz` }] : []),
         { label: t("profile.lora.power"), value: l.txPower === 0 ? t("profile.lora.powerAuto") : `${l.txPower} dBm` },
@@ -888,6 +1621,8 @@ export function describeDeviceProfile(profile: DeviceProfile, t: TFunction): Pro
         { label: t("profile.telemetry.device"), value: tel.deviceUpdateInterval === 0 ? t("profile.telemetry.deviceDefault") : formatInterval(tel.deviceUpdateInterval, t) },
         { label: t("profile.telemetry.environment"), value: tel.environmentMeasurementEnabled ? formatInterval(tel.environmentUpdateInterval, t) : t("profile.deactivated") },
         ...(tel.powerMeasurementEnabled ? [{ label: t("profile.telemetry.power"), value: formatInterval(tel.powerUpdateInterval, t) }] : []),
+        ...(tel.airQualityEnabled ? [{ label: t("profile.telemetry.airQuality"), value: formatInterval(tel.airQualityInterval, t) }] : []),
+        ...(tel.healthMeasurementEnabled ? [{ label: t("profile.telemetry.health"), value: formatInterval(tel.healthUpdateInterval, t) }] : []),
       ],
     });
   }
@@ -938,6 +1673,16 @@ export function describeDeviceProfile(profile: DeviceProfile, t: TFunction): Pro
  * igual que `applyPreset`.
  */
 export async function applyDeviceProfile(device: MeshDevice, profile: DeviceProfile, t: TFunction, onProgress?: ProgressFn): Promise<void> {
+  await withApplyTimeout(device, (markRebooting) => applyDeviceProfileInner(device, profile, t, onProgress, markRebooting));
+}
+
+async function applyDeviceProfileInner(
+  device: MeshDevice,
+  profile: DeviceProfile,
+  t: TFunction,
+  onProgress: ProgressFn | undefined,
+  markRebooting: () => void,
+): Promise<void> {
   if (profile.longName || profile.shortName) {
     onProgress?.(t("progress.sendingNodeName"), { percent: 5 });
     await device.setOwner(
@@ -947,6 +1692,7 @@ export async function applyDeviceProfile(device: MeshDevice, profile: DeviceProf
 
   const configSections = presentSections(CONFIG_SECTION_LABELS, profile.config as unknown as Record<string, unknown>);
   for (const [i, kind] of configSections.entries()) {
+    if (i > 0) await sleep(APPLY_STEP_DELAY_MS);
     onProgress?.(t("progress.sendingConfigSection", { section: t(CONFIG_SECTION_LABELS[kind]) }), {
       percent: 10 + (i / configSections.length) * 25,
     });
@@ -959,6 +1705,7 @@ export async function applyDeviceProfile(device: MeshDevice, profile: DeviceProf
   if (profile.channelUrl) {
     const channelSet = parseChannelUrl(profile.channelUrl);
     for (const [index, settings] of channelSet.settings.entries()) {
+      await sleep(APPLY_STEP_DELAY_MS);
       onProgress?.(
         t("progress.sendingChannel", {
           which: index === 0 ? t("progress.channelPrimary") : t("progress.channelSecondary"),
@@ -981,6 +1728,7 @@ export async function applyDeviceProfile(device: MeshDevice, profile: DeviceProf
     profile.moduleConfig as unknown as Record<string, unknown>,
   );
   for (const [i, kind] of moduleConfigSections.entries()) {
+    await sleep(APPLY_STEP_DELAY_MS);
     onProgress?.(t("progress.sendingModuleConfigSection", { section: t(MODULE_CONFIG_SECTION_LABELS[kind]) }), {
       percent: 60 + (i / moduleConfigSections.length) * 25,
     });
@@ -990,7 +1738,10 @@ export async function applyDeviceProfile(device: MeshDevice, profile: DeviceProf
     );
   }
 
+  await sleep(APPLY_STEP_DELAY_MS);
+  markRebooting();
+  await commitEditSettings(device);
   onProgress?.(t("progress.rebooting"), { percent: 90 });
-  await device.reboot(2);
+  await rebootDevice(device);
   onProgress?.(t("progress.applied"), { percent: 100 });
 }

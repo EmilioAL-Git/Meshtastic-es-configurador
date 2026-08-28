@@ -18,7 +18,19 @@ export const LOCALE_CODES = Object.keys(LOCALES) as Locale[];
 
 const STORAGE_KEY = "meshtastic-es-configurador:locale";
 
+function detectLocaleFromUrl(): Locale | null {
+  try {
+    const param = new URLSearchParams(window.location.search).get("lang");
+    if (param && param in LOCALES) return param as Locale;
+  } catch {
+    // Sin acceso a la URL (SSR, etc.): ignoramos y seguimos con las demás fuentes.
+  }
+  return null;
+}
+
 function detectLocale(): Locale {
+  const fromUrl = detectLocaleFromUrl();
+  if (fromUrl) return fromUrl;
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
     if (stored && stored in LOCALES) return stored as Locale;
@@ -49,7 +61,17 @@ interface I18nContextValue {
 const I18nContext = createContext<I18nContextValue | null>(null);
 
 export function I18nProvider({ children }: { children: ReactNode }) {
-  const [locale, setLocaleState] = useState<Locale>(() => detectLocale());
+  const [locale, setLocaleState] = useState<Locale>(() => {
+    const initial = detectLocale();
+    if (detectLocaleFromUrl() === initial) {
+      try {
+        localStorage.setItem(STORAGE_KEY, initial);
+      } catch {
+        // Sin localStorage disponible, el idioma del enlace simplemente no persiste entre sesiones.
+      }
+    }
+    return initial;
+  });
 
   const setLocale = useCallback((next: Locale) => {
     setLocaleState(next);
@@ -57,6 +79,13 @@ export function I18nProvider({ children }: { children: ReactNode }) {
       localStorage.setItem(STORAGE_KEY, next);
     } catch {
       // Sin localStorage disponible, el idioma simplemente no persiste entre sesiones.
+    }
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.set("lang", next);
+      window.history.replaceState(null, "", url);
+    } catch {
+      // Sin acceso a la URL (SSR, etc.): el idioma sigue funcionando, solo no queda reflejado en el enlace.
     }
   }, []);
 

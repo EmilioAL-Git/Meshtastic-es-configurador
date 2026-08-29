@@ -473,11 +473,10 @@
 /* ── Pestañas de configuración ── */
 .tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   margin-bottom: 18px;
   border-bottom: 1px solid var(--border);
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
 }
 
 .tab-button {
@@ -490,7 +489,6 @@
   color: var(--muted);
   cursor: pointer;
   white-space: nowrap;
-  flex-shrink: 0;
   transition: color 0.15s, border-color 0.15s;
 }
 

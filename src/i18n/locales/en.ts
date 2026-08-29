@@ -294,6 +294,8 @@ const en = {
   "error.gattFailed": "Bluetooth communication failure with the device (GATT).",
   "error.failedToOpen": "Couldn't open the port.",
   "error.configTimeout": "Timed out waiting for the device's initial configuration.",
+  "error.bluetoothGattTimeout":
+    "Couldn't connect over Bluetooth (timed out). Make sure the node isn't already connected to the official Meshtastic app or another tab, that it's nearby and powered on, and try again.",
   "error.failedToFetch": "Couldn't reach the node over the network. Check the IP/host and that it's on the same network.",
   "error.applyTimeout": "Lost connection to the node while applying the configuration. Check the USB/Bluetooth/network connection and try again.",
 
@@ -301,6 +303,7 @@ const en = {
   "progress.reconnecting": "Reconnecting to the node…",
   "progress.connectedRequesting": "Connected. Requesting node configuration…",
   "progress.downloadingConfig": "Downloading configuration and known mesh nodes…",
+  "progress.bluetoothRetryingConnect": "First Bluetooth connection attempt failed, retrying…",
   "progress.configReceived": "Node configuration received.",
   "progress.nodeIdentified": "Node identified (num. {num}).",
   "progress.receivingNodes": "Receiving known mesh nodes… ({count})",
@@ -465,6 +468,8 @@ const en = {
 
   "applyLog.error": "Error: {message}",
   "applyLog.disconnected": "The node disconnected while rebooting. Reconnect once it's ready.",
+  "applyLog.reconnecting": "Lost the Bluetooth connection while applying changes. Reconnecting automatically…",
+  "applyLog.retrying": "Reconnected. Retrying the configuration…",
 
   "applyProgress.titleRunning": "Applying configuration…",
   "applyProgress.titleDone": "Configuration applied",

@@ -294,6 +294,8 @@ const ca = {
   "error.gattFailed": "Fallada de comunicació Bluetooth amb el dispositiu (GATT).",
   "error.failedToOpen": "No s'ha pogut obrir el port.",
   "error.configTimeout": "S'ha exhaurit el temps d'espera per a la configuració inicial del dispositiu.",
+  "error.bluetoothGattTimeout":
+    "No s'ha pogut connectar per Bluetooth (temps d'espera exhaurit). Comprova que el node no estigui ja connectat a l'app oficial de Meshtastic o a una altra pestanya, que estigui a prop i engegat, i torna-ho a intentar.",
   "error.failedToFetch": "No s'ha pogut contactar amb el node per xarxa. Comprova la IP/host i que estigui a la mateixa xarxa.",
   "error.applyTimeout": "S'ha perdut la connexió amb el node en aplicar la configuració. Comprova la connexió USB/Bluetooth/xarxa i torna-ho a provar.",
 
@@ -301,6 +303,7 @@ const ca = {
   "progress.reconnecting": "Reconnectant amb el node…",
   "progress.connectedRequesting": "Connectat. Sol·licitant configuració del node…",
   "progress.downloadingConfig": "Descarregant configuració i nodes coneguts de la malla…",
+  "progress.bluetoothRetryingConnect": "Primer intent de connexió Bluetooth fallit, reintentant…",
   "progress.configReceived": "Configuració del node rebuda.",
   "progress.nodeIdentified": "Node identificat (núm. {num}).",
   "progress.receivingNodes": "Rebent nodes coneguts de la malla… ({count})",
@@ -465,6 +468,8 @@ const ca = {
 
   "applyLog.error": "Error: {message}",
   "applyLog.disconnected": "El node s'ha desconnectat en reiniciar-se. Torna a connectar quan estigui llest.",
+  "applyLog.reconnecting": "S'ha perdut la connexió Bluetooth a mig aplicar els canvis. Reconnectant automàticament…",
+  "applyLog.retrying": "Reconnectat. Reintentant aplicar la configuració…",
 
   "applyProgress.titleRunning": "Aplicant la configuració…",
   "applyProgress.titleDone": "Configuració aplicada",

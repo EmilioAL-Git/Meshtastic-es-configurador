@@ -28,6 +28,7 @@ import {
   readMoreConfigValues,
   translateError,
   type ChannelPreset,
+  type ConnectResult,
   type DeviceProfile,
   type DeviceProfileSource,
   type DeviceSnapshot,
@@ -212,6 +213,10 @@ function App() {
   const [deviceSnapshot, setDeviceSnapshot] = useState<DeviceSnapshot | null>(null);
   const stopSnapshotTrackingRef = useRef<(() => void) | null>(null);
   const getDeviceProfileSourceRef = useRef<(() => DeviceProfileSource) | null>(null);
+  /** Solo se rellena tras conectar por Bluetooth: permite reconectar al mismo
+   * `BluetoothDevice` (sin volver a mostrar el selector) para reintentar "Aplicar" si la
+   * conexión GATT se cae a mitad de aplicar cambios — algo frecuente en Android. */
+  const reconnectBluetoothRef = useRef<(() => Promise<ConnectResult>) | null>(null);
   const connectingDeviceRef = useRef<MeshDevice | null>(null);
   const connectSeqRef = useRef(0);
   const importFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -247,6 +252,29 @@ function App() {
     setProgressModalOpen(false);
   }
 
+  /**
+   * En móvil no hay forma práctica de abrir la consola del navegador para ver qué falla
+   * realmente (requiere depuración remota por USB desde un ordenador). Volcar aquí
+   * cualquier error/rechazo no capturado al propio registro en pantalla es la única vía
+   * para diagnosticar fallos como una promesa del SDK que se queda colgada sin que ningún
+   * `catch` de la app llegue a intervenir.
+   */
+  useEffect(() => {
+    function handleWindowError(e: ErrorEvent) {
+      appendLog(`⚠️ Error no controlado: ${e.message}`);
+    }
+    function handleRejection(e: PromiseRejectionEvent) {
+      const reason = e.reason instanceof Error ? e.reason.message : String(e.reason);
+      appendLog(`⚠️ Promesa rechazada sin capturar: ${reason}`);
+    }
+    window.addEventListener("error", handleWindowError);
+    window.addEventListener("unhandledrejection", handleRejection);
+    return () => {
+      window.removeEventListener("error", handleWindowError);
+      window.removeEventListener("unhandledrejection", handleRejection);
+    };
+  }, []);
+
   async function handleConnect(via: ConnectionVia) {
     if (via === "network" && networkAddress.trim() === "") return;
     stopSnapshotTrackingRef.current?.();
@@ -267,7 +295,7 @@ function App() {
       // que hay que empezar a escucharlos desde ya (dentro de connectSerial/
       // connectBluetooth/connectNetwork) — si nos suscribiéramos después de
       // "Conectado", ya habrían pasado y el panel se quedaría esperando para siempre.
-      const { device, stopSnapshotTracking, getDeviceProfileSource } =
+      const { device, stopSnapshotTracking, getDeviceProfileSource, reconnect } =
         via === "usb"
           ? await connectSerial(t, appendLog, setDeviceSnapshot, onDeviceCreated)
           : via === "bluetooth"
@@ -282,6 +310,7 @@ function App() {
       connectingDeviceRef.current = null;
       stopSnapshotTrackingRef.current = stopSnapshotTracking;
       getDeviceProfileSourceRef.current = getDeviceProfileSource;
+      reconnectBluetoothRef.current = reconnect ?? null;
       setConn({ status: "connected", via, device });
       appendLog(t("connect.connectedLog", { via: t(VIA_LABEL_KEYS[via]) }));
     } catch (err) {
@@ -310,6 +339,7 @@ function App() {
     stopSnapshotTrackingRef.current?.();
     stopSnapshotTrackingRef.current = null;
     getDeviceProfileSourceRef.current = null;
+    reconnectBluetoothRef.current = null;
     if (conn.status === "connected") {
       await disconnectDevice(conn.device);
     } else if (connectingDeviceRef.current) {
@@ -442,9 +472,34 @@ function App() {
     stopSnapshotTrackingRef.current?.();
     stopSnapshotTrackingRef.current = null;
     getDeviceProfileSourceRef.current = null;
+    reconnectBluetoothRef.current = null;
     setConn({ status: "disconnected" });
     setDeviceSnapshot(null);
     appendLog(t("applyLog.disconnected"));
+  }
+
+  /**
+   * Por Bluetooth es habitual (sobre todo en Android) que la conexión GATT se caiga a
+   * mitad de aplicar cambios sin motivo aparente — un problema de la propia pila
+   * Bluetooth del teléfono, no del nodo ni de la configuración enviada. En vez de obligar
+   * al usuario a reconectar a mano y repetir todo, reconectamos automáticamente al mismo
+   * `BluetoothDevice` (sin volver a mostrar el selector) y reintentamos una sola vez antes
+   * de darnos por vencidos.
+   */
+  async function runApplyWithReconnect(device: MeshDevice, run: (device: MeshDevice) => Promise<void>): Promise<void> {
+    try {
+      await run(device);
+    } catch (err) {
+      if (!(err instanceof Error) || err.message !== "DEVICE_DISCONNECTED" || !reconnectBluetoothRef.current) throw err;
+      appendLog(t("applyLog.reconnecting"));
+      const fresh = await reconnectBluetoothRef.current();
+      stopSnapshotTrackingRef.current = fresh.stopSnapshotTracking;
+      getDeviceProfileSourceRef.current = fresh.getDeviceProfileSource;
+      reconnectBluetoothRef.current = fresh.reconnect ?? null;
+      setConn({ status: "connected", via: "bluetooth", device: fresh.device });
+      appendLog(t("applyLog.retrying"));
+      await run(fresh.device);
+    }
   }
 
   async function handleApply() {
@@ -464,17 +519,19 @@ function App() {
 
     beginApplyProgress();
     try {
-      await applyPreset(conn.device, t, {
-        lora,
-        channel,
-        additionalChannels: additionalChannelPresets,
-        telemetry,
-        region: LORA_REGION_CODES[region],
-        source,
-        moreConfig: moreConfigValues ?? undefined,
-        moreConfigBaseline: moreConfigBaseline ?? undefined,
-        onProgress: appendLog,
-      });
+      await runApplyWithReconnect(conn.device, (device) =>
+        applyPreset(device, t, {
+          lora,
+          channel,
+          additionalChannels: additionalChannelPresets,
+          telemetry,
+          region: LORA_REGION_CODES[region],
+          source,
+          moreConfig: moreConfigValues ?? undefined,
+          moreConfigBaseline: moreConfigBaseline ?? undefined,
+          onProgress: appendLog,
+        }),
+      );
       handleApplySucceeded();
     } catch (err) {
       const message = translateError(err, t);
@@ -521,7 +578,7 @@ function App() {
     setImportPending(null);
     beginApplyProgress();
     try {
-      await applyDeviceProfile(conn.device, profile, t, appendLog);
+      await runApplyWithReconnect(conn.device, (device) => applyDeviceProfile(device, profile, t, appendLog));
       handleApplySucceeded();
     } catch (err) {
       const message = translateError(err, t);

@@ -108,6 +108,7 @@ const KNOWN_ERROR_TRANSLATIONS: Array<[RegExp, MessageKey]> = [
   [/gatt operation failed/i, "error.gattFailed"],
   [/failed to open/i, "error.failedToOpen"],
   [/^CONFIG_TIMEOUT$/, "error.configTimeout"],
+  [/^BLUETOOTH_GATT_TIMEOUT$/, "error.bluetoothGattTimeout"],
   [/failed to fetch/i, "error.failedToFetch"],
   [/^APPLY_TIMEOUT$/, "error.applyTimeout"],
   [/^DEVICE_DISCONNECTED$/, "error.applyTimeout"],
@@ -127,6 +128,25 @@ export function isWebSerialSupported(): boolean {
 
 export function isWebBluetoothSupported(): boolean {
   return typeof navigator !== "undefined" && "bluetooth" in navigator;
+}
+
+/**
+ * En Android, si la pantalla del móvil se bloquea por inactividad mientras se conecta o se
+ * aplican cambios por Bluetooth (típico: el usuario pulsa "Aplicar" y no vuelve a tocar la
+ * pantalla durante los siguientes segundos), Chrome pasa la pestaña a segundo plano y
+ * suspende/ralentiza sus temporizadores — la operación GATT en curso se queda "congelada"
+ * sin ningún evento ni error hasta que se desbloquea el teléfono, dando la sensación de que
+ * la app se ha quedado colgada. Un Wake Lock de pantalla evita que se bloquee mientras dura
+ * la operación. Si la API no existe (navegador de escritorio, Safari/iOS) o el permiso se
+ * deniega, seguimos igual sin bloquear nada.
+ */
+async function withScreenAwake<T>(run: () => Promise<T>): Promise<T> {
+  const wakeLock = await navigator.wakeLock?.request("screen").catch(() => null);
+  try {
+    return await run();
+  } finally {
+    wakeLock?.release().catch(() => {});
+  }
 }
 
 /**
@@ -249,11 +269,16 @@ function requestConfigure(device: MeshDevice): void {
 }
 
 /** Resultado de conectar: el dispositivo, cómo dejar de escuchar su configuración (llamar al
- * desconectar), y cómo leer lo que se ha ido recogiendo de ella para exportarla. */
+ * desconectar), y cómo leer lo que se ha ido recogiendo de ella para exportarla.
+ * `reconnect`, solo presente para Bluetooth, reconecta al mismo `BluetoothDevice` ya
+ * emparejado (sin volver a mostrar el selector) — lo usa la UI para reintentar `applyPreset`
+ * automáticamente si la conexión GATT se cae a mitad de aplicar cambios, algo frecuente en
+ * Android. */
 export interface ConnectResult {
   device: MeshDevice;
   stopSnapshotTracking: () => void;
   getDeviceProfileSource: () => DeviceProfileSource;
+  reconnect?: () => Promise<ConnectResult>;
 }
 
 export async function connectSerial(
@@ -281,25 +306,85 @@ export async function connectSerial(
   return { device, stopSnapshotTracking: tracking.stop, getDeviceProfileSource: tracking.getRaw };
 }
 
+/**
+ * En Android, `BluetoothRemoteGATTServer.connect()` se queda colgado indefinidamente
+ * con cierta frecuencia (el nodo ya está conectado a la app oficial u otra pestaña, el
+ * dispositivo salió de rango justo tras el emparejamiento, etc.), sin lanzar ningún
+ * error ni disparar ningún evento — a diferencia de `waitUntilConfigured`, esta promesa
+ * no tiene timeout propio. Como esto ocurre antes de que exista un `MeshDevice`
+ * (`onDeviceCreated` aún no se ha llamado), el botón "Desconectar" tampoco puede
+ * cancelarlo, así que sin este límite de tiempo la conexión se queda parada al
+ * principio sin ningún mensaje ni forma de salir salvo recargar la página.
+ */
+async function connectBluetoothDevice(device: BluetoothDevice, timeoutMs = 15000): Promise<TransportWebBluetooth> {
+  return Promise.race([
+    TransportWebBluetooth.createFromDevice(device),
+    new Promise<TransportWebBluetooth>((_, reject) =>
+      setTimeout(() => reject(new Error("BLUETOOTH_GATT_TIMEOUT")), timeoutMs),
+    ),
+  ]);
+}
+
+/**
+ * En Android, el primer intento de conexión GATT justo después de emparejar (elegir el
+ * dispositivo por primera vez en el selector del navegador) falla con frecuencia mientras
+ * el sistema todavía está terminando de negociar el vínculo Bluetooth a nivel de SO; un
+ * segundo intento inmediato contra el mismo `BluetoothDevice` normalmente ya funciona. Sin
+ * este reintento automático, el usuario tenía que cancelar y pulsar "Conectar" otra vez
+ * desde cero (reabriendo el selector) para que la segunda vez sí cargara.
+ */
+async function connectBluetoothDeviceWithRetry(
+  device: BluetoothDevice,
+  t: TFunction,
+  onProgress?: ProgressFn,
+): Promise<TransportWebBluetooth> {
+  try {
+    return await connectBluetoothDevice(device);
+  } catch {
+    onProgress?.(t("progress.bluetoothRetryingConnect"), { percent: 0 });
+    return await connectBluetoothDevice(device);
+  }
+}
+
+async function connectToBleDevice(
+  bleDevice: BluetoothDevice,
+  t: TFunction,
+  onProgress?: ProgressFn,
+  onSnapshot?: (snapshot: DeviceSnapshot) => void,
+  onDeviceCreated?: (device: MeshDevice) => void,
+): Promise<ConnectResult> {
+  return withScreenAwake(async () => {
+    const transport = await connectBluetoothDeviceWithRetry(bleDevice, t, onProgress);
+    const device = new MeshDevice(transport);
+    onDeviceCreated?.(device);
+    silenceDeviceLogger(device);
+    const tracking = subscribeDeviceSnapshot(device, t, onSnapshot);
+    const stopTracking = trackConnectionProgress(device, t, onProgress);
+    try {
+      requestConfigure(device);
+      await waitUntilConfigured(device);
+    } finally {
+      stopTracking();
+    }
+    return {
+      device,
+      stopSnapshotTracking: tracking.stop,
+      getDeviceProfileSource: tracking.getRaw,
+      reconnect: () => connectToBleDevice(bleDevice, t, onProgress, onSnapshot, onDeviceCreated),
+    };
+  });
+}
+
 export async function connectBluetooth(
   t: TFunction,
   onProgress?: ProgressFn,
   onSnapshot?: (snapshot: DeviceSnapshot) => void,
   onDeviceCreated?: (device: MeshDevice) => void,
 ): Promise<ConnectResult> {
-  const transport = await TransportWebBluetooth.create();
-  const device = new MeshDevice(transport);
-  onDeviceCreated?.(device);
-  silenceDeviceLogger(device);
-  const tracking = subscribeDeviceSnapshot(device, t, onSnapshot);
-  const stopTracking = trackConnectionProgress(device, t, onProgress);
-  try {
-    requestConfigure(device);
-    await waitUntilConfigured(device);
-  } finally {
-    stopTracking();
-  }
-  return { device, stopSnapshotTracking: tracking.stop, getDeviceProfileSource: tracking.getRaw };
+  const bleDevice = await navigator.bluetooth.requestDevice({
+    filters: [{ services: [TransportWebBluetooth.ServiceUuid] }],
+  });
+  return connectToBleDevice(bleDevice, t, onProgress, onSnapshot, onDeviceCreated);
 }
 
 /**
@@ -721,7 +806,9 @@ export interface ApplyPresetOptions {
  * envía en una sola tanda con un único reinicio al final.
  */
 export async function applyPreset(device: MeshDevice, t: TFunction, opts: ApplyPresetOptions): Promise<void> {
-  await withApplyTimeout(device, (markRebooting) => applyPresetInner(device, t, opts, markRebooting));
+  await withScreenAwake(() =>
+    withApplyTimeout(device, (markRebooting) => applyPresetInner(device, t, opts, markRebooting)),
+  );
 }
 
 async function applyPresetInner(
@@ -1673,7 +1760,9 @@ export function describeDeviceProfile(profile: DeviceProfile, t: TFunction): Pro
  * igual que `applyPreset`.
  */
 export async function applyDeviceProfile(device: MeshDevice, profile: DeviceProfile, t: TFunction, onProgress?: ProgressFn): Promise<void> {
-  await withApplyTimeout(device, (markRebooting) => applyDeviceProfileInner(device, profile, t, onProgress, markRebooting));
+  await withScreenAwake(() =>
+    withApplyTimeout(device, (markRebooting) => applyDeviceProfileInner(device, profile, t, onProgress, markRebooting)),
+  );
 }
 
 async function applyDeviceProfileInner(

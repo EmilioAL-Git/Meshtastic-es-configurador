@@ -296,6 +296,8 @@ const es = {
   "error.gattFailed": "Fallo de comunicación Bluetooth con el dispositivo (GATT).",
   "error.failedToOpen": "No se ha podido abrir el puerto.",
   "error.configTimeout": "Tiempo de espera agotado esperando la configuración inicial del dispositivo.",
+  "error.bluetoothGattTimeout":
+    "No se pudo conectar por Bluetooth (tiempo de espera agotado). Comprueba que el nodo no esté ya conectado a la app oficial de Meshtastic u otra pestaña, que esté cerca y encendido, y vuelve a intentarlo.",
   "error.failedToFetch": "No se ha podido contactar con el nodo por red. Comprueba la IP/host y que esté en la misma red.",
   "error.applyTimeout": "Se ha perdido la conexión con el nodo mientras se aplicaba la configuración. Comprueba la conexión USB/Bluetooth/red y vuelve a intentarlo.",
 
@@ -303,6 +305,7 @@ const es = {
   "progress.reconnecting": "Reconectando con el nodo…",
   "progress.connectedRequesting": "Conectado. Solicitando configuración del nodo…",
   "progress.downloadingConfig": "Descargando configuración y nodos conocidos de la malla…",
+  "progress.bluetoothRetryingConnect": "Primer intento de conexión Bluetooth fallido, reintentando…",
   "progress.configReceived": "Configuración del nodo recibida.",
   "progress.nodeIdentified": "Nodo identificado (núm. {num}).",
   "progress.receivingNodes": "Recibiendo nodos conocidos de la malla… ({count})",
@@ -467,6 +470,8 @@ const es = {
 
   "applyLog.error": "Error: {message}",
   "applyLog.disconnected": "El nodo se ha desconectado al reiniciar. Vuelve a conectar cuando esté listo.",
+  "applyLog.reconnecting": "Se ha perdido la conexión Bluetooth a mitad de aplicar cambios. Reconectando automáticamente…",
+  "applyLog.retrying": "Reconectado. Reintentando aplicar la configuración…",
 
   "applyProgress.titleRunning": "Aplicando la configuración…",
   "applyProgress.titleDone": "Configuración aplicada",

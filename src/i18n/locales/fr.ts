@@ -294,6 +294,8 @@ const fr = {
   "error.gattFailed": "Échec de communication Bluetooth avec l'appareil (GATT).",
   "error.failedToOpen": "Impossible d'ouvrir le port.",
   "error.configTimeout": "Délai d'attente dépassé pour la configuration initiale de l'appareil.",
+  "error.bluetoothGattTimeout":
+    "Impossible de se connecter en Bluetooth (délai dépassé). Vérifiez que le nœud n'est pas déjà connecté à l'application officielle Meshtastic ou à un autre onglet, qu'il est à proximité et allumé, puis réessayez.",
   "error.failedToFetch": "Impossible de contacter le nœud par le réseau. Vérifiez l'IP/hôte et qu'il est sur le même réseau.",
   "error.applyTimeout": "Connexion au nœud perdue pendant l'application de la configuration. Vérifie la connexion USB/Bluetooth/réseau et réessaie.",
 
@@ -301,6 +303,7 @@ const fr = {
   "progress.reconnecting": "Reconnexion au nœud…",
   "progress.connectedRequesting": "Connecté. Demande de la configuration du nœud…",
   "progress.downloadingConfig": "Téléchargement de la configuration et des nœuds connus du maillage…",
+  "progress.bluetoothRetryingConnect": "Première tentative de connexion Bluetooth échouée, nouvel essai…",
   "progress.configReceived": "Configuration du nœud reçue.",
   "progress.nodeIdentified": "Nœud identifié (n° {num}).",
   "progress.receivingNodes": "Réception des nœuds connus du maillage… ({count})",
@@ -465,6 +468,8 @@ const fr = {
 
   "applyLog.error": "Erreur : {message}",
   "applyLog.disconnected": "Le nœud s'est déconnecté au redémarrage. Reconnectez-vous une fois prêt.",
+  "applyLog.reconnecting": "Connexion Bluetooth perdue en cours d'application des changements. Reconnexion automatique…",
+  "applyLog.retrying": "Reconnecté. Nouvelle tentative d'application de la configuration…",
 
   "applyProgress.titleRunning": "Application de la configuration…",
   "applyProgress.titleDone": "Configuration appliquée",

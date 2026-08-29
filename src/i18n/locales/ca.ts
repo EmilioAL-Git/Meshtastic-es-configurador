@@ -470,6 +470,7 @@ const ca = {
   "applyLog.disconnected": "El node s'ha desconnectat en reiniciar-se. Torna a connectar quan estigui llest.",
   "applyLog.reconnecting": "S'ha perdut la connexió Bluetooth a mig aplicar els canvis. Reconnectant automàticament…",
   "applyLog.retrying": "Reconnectat. Reintentant aplicar la configuració…",
+  "applyLog.reconnectingAgain": "S'ha perdut la connexió una altra vegada (intent {attempt} de {maxAttempts}). Reconnectant…",
 
   "applyProgress.titleRunning": "Aplicant la configuració…",
   "applyProgress.titleDone": "Configuració aplicada",

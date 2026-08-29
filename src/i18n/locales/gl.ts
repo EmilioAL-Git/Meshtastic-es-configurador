@@ -470,6 +470,7 @@ const gl = {
   "applyLog.disconnected": "O nodo desconectouse ao reiniciar. Volve conectar cando estea listo.",
   "applyLog.reconnecting": "Perdeuse a conexión Bluetooth a metade de aplicar os cambios. Reconectando automaticamente…",
   "applyLog.retrying": "Reconectado. Reintentando aplicar a configuración…",
+  "applyLog.reconnectingAgain": "Perdeuse a conexión outra vez (intento {attempt} de {maxAttempts}). Reconectando…",
 
   "applyProgress.titleRunning": "Aplicando a configuración…",
   "applyProgress.titleDone": "Configuración aplicada",

@@ -470,6 +470,7 @@ const en = {
   "applyLog.disconnected": "The node disconnected while rebooting. Reconnect once it's ready.",
   "applyLog.reconnecting": "Lost the Bluetooth connection while applying changes. Reconnecting automatically…",
   "applyLog.retrying": "Reconnected. Retrying the configuration…",
+  "applyLog.reconnectingAgain": "Lost the connection again (attempt {attempt} of {maxAttempts}). Reconnecting…",
 
   "applyProgress.titleRunning": "Applying configuration…",
   "applyProgress.titleDone": "Configuration applied",

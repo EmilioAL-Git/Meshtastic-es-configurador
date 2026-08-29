@@ -481,24 +481,39 @@ function App() {
   /**
    * Por Bluetooth es habitual (sobre todo en Android) que la conexión GATT se caiga a
    * mitad de aplicar cambios sin motivo aparente — un problema de la propia pila
-   * Bluetooth del teléfono, no del nodo ni de la configuración enviada. En vez de obligar
-   * al usuario a reconectar a mano y repetir todo, reconectamos automáticamente al mismo
-   * `BluetoothDevice` (sin volver a mostrar el selector) y reintentamos una sola vez antes
-   * de darnos por vencidos.
+   * Bluetooth del teléfono, no del nodo ni de la configuración enviada. Con un único
+   * reintento a veces no basta (la pila puede tardar varios intentos en estabilizarse), así
+   * que probamos hasta `maxAttempts` veces en total, reconectando cada vez al mismo
+   * `BluetoothDevice` (sin volver a mostrar el selector) y dando un respiro breve para que
+   * el radio Bluetooth del teléfono se asiente antes de volver a escribir.
    */
-  async function runApplyWithReconnect(device: MeshDevice, run: (device: MeshDevice) => Promise<void>): Promise<void> {
-    try {
-      await run(device);
-    } catch (err) {
-      if (!(err instanceof Error) || err.message !== "DEVICE_DISCONNECTED" || !reconnectBluetoothRef.current) throw err;
-      appendLog(t("applyLog.reconnecting"));
-      const fresh = await reconnectBluetoothRef.current();
-      stopSnapshotTrackingRef.current = fresh.stopSnapshotTracking;
-      getDeviceProfileSourceRef.current = fresh.getDeviceProfileSource;
-      reconnectBluetoothRef.current = fresh.reconnect ?? null;
-      setConn({ status: "connected", via: "bluetooth", device: fresh.device });
-      appendLog(t("applyLog.retrying"));
-      await run(fresh.device);
+  function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async function runApplyWithReconnect(
+    device: MeshDevice,
+    run: (device: MeshDevice) => Promise<void>,
+    maxAttempts = 3,
+  ): Promise<void> {
+    let current = device;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await run(current);
+        return;
+      } catch (err) {
+        const canRetry = attempt < maxAttempts && err instanceof Error && err.message === "DEVICE_DISCONNECTED" && reconnectBluetoothRef.current;
+        if (!canRetry) throw err;
+        appendLog(attempt === 1 ? t("applyLog.reconnecting") : t("applyLog.reconnectingAgain", { attempt, maxAttempts }));
+        await sleep(1500);
+        const fresh = await reconnectBluetoothRef.current!();
+        stopSnapshotTrackingRef.current = fresh.stopSnapshotTracking;
+        getDeviceProfileSourceRef.current = fresh.getDeviceProfileSource;
+        reconnectBluetoothRef.current = fresh.reconnect ?? null;
+        setConn({ status: "connected", via: "bluetooth", device: fresh.device });
+        appendLog(t("applyLog.retrying"));
+        current = fresh.device;
+      }
     }
   }
 

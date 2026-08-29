@@ -472,6 +472,7 @@ const es = {
   "applyLog.disconnected": "El nodo se ha desconectado al reiniciar. Vuelve a conectar cuando esté listo.",
   "applyLog.reconnecting": "Se ha perdido la conexión Bluetooth a mitad de aplicar cambios. Reconectando automáticamente…",
   "applyLog.retrying": "Reconectado. Reintentando aplicar la configuración…",
+  "applyLog.reconnectingAgain": "Se ha perdido la conexión otra vez (intento {attempt} de {maxAttempts}). Reconectando…",
 
   "applyProgress.titleRunning": "Aplicando la configuración…",
   "applyProgress.titleDone": "Configuración aplicada",

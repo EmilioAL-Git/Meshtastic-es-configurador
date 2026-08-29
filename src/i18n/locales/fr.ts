@@ -470,6 +470,7 @@ const fr = {
   "applyLog.disconnected": "Le nœud s'est déconnecté au redémarrage. Reconnectez-vous une fois prêt.",
   "applyLog.reconnecting": "Connexion Bluetooth perdue en cours d'application des changements. Reconnexion automatique…",
   "applyLog.retrying": "Reconnecté. Nouvelle tentative d'application de la configuration…",
+  "applyLog.reconnectingAgain": "Connexion perdue à nouveau (tentative {attempt} sur {maxAttempts}). Reconnexion…",
 
   "applyProgress.titleRunning": "Application de la configuration…",
   "applyProgress.titleDone": "Configuration appliquée",

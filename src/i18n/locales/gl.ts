@@ -4,13 +4,11 @@ const gl = {
   "header.tagline": "Axustes de LoRa, canle e telemetría nun clic",
   "browserWarning": "O teu navegador non admite Web Serial nin Web Bluetooth. Usa Chrome ou Edge de escritorio.",
 
-  "mobileWarning.iosTitle": "Non dispoñible en iPhone/iPad",
   "mobileWarning.iosBody":
     "Safari (e calquera navegador en iOS) non admite Web Bluetooth nin Web Serial, e Apple non ten previsto engadilo — non hai nada que facer desde aquí. A única forma de usar este configurador por Bluetooth no iPhone é abrir esta mesma páxina dentro da app \"Bluefy – Web BLE Browser\" (dispoñible na App Store). Para USB, usa un ordenador ou a app oficial de Meshtastic.",
-  "mobileWarning.androidTitle": "O Bluetooth no móbil non sempre é fiable",
   "mobileWarning.androidBody":
-    "En Android, o Bluetooth polo navegador pode fallar ou desconectarse de forma intermitente ao aplicar cambios (unha limitación de Chrome en Android, non deste configurador nin do nodo). Para máis fiabilidade, usa un ordenador por USB. Se aínda así queres continuar desde o móbil, podes facelo.",
-  "mobileWarning.continueAnyway": "Continuar de todos xeitos",
+    "En Android, o Bluetooth polo navegador pode fallar ou desconectarse de forma intermitente ao aplicar cambios (unha limitación de Chrome en Android, non deste configurador nin do nodo). Para máis fiabilidade, usa un ordenador por USB.",
+  "mobileWarning.continueAnyway": "Enténdoo e quero intentalo igualmente",
 
   "via.usb": "USB",
   "via.bluetooth": "Bluetooth",

@@ -714,6 +714,17 @@ function App() {
           <div className="browser-warning">{t("browserWarning")}</div>
         )}
 
+        {mobileWarningVariant && !mobileWarningDismissed && (
+          <div className="browser-warning">
+            <p>{t(mobileWarningVariant === "ios" ? "mobileWarning.iosBody" : "mobileWarning.androidBody")}</p>
+            {mobileWarningVariant === "mobile" && (
+              <button type="button" className="btn" onClick={() => setMobileWarningDismissed(true)}>
+                {t("mobileWarning.continueAnyway")}
+              </button>
+            )}
+          </div>
+        )}
+
         <div className={`layout${conn.status === "connected" || conn.status === "connecting" ? " has-sidebar" : ""}`}>
         <div className="main-column">
         <section className="panel">
@@ -1568,13 +1579,6 @@ function App() {
         </div>
       </main>
 
-      {mobileWarningVariant && !mobileWarningDismissed && (
-        <MobileWarningModal
-          variant={mobileWarningVariant}
-          onContinue={mobileWarningVariant === "mobile" ? () => setMobileWarningDismissed(true) : undefined}
-        />
-      )}
-
       {confirmApplyOpen && conn.status === "connected" && primaryPskBytes !== null && (
         <ConfirmApplyModal
           snapshot={deviceSnapshot}
@@ -2026,26 +2030,6 @@ function ConfirmApplyModal({
             {t("confirmApply.confirm")}
           </button>
         </div>
-      </div>
-    </div>
-  );
-}
-
-function MobileWarningModal({ variant, onContinue }: { variant: "ios" | "mobile"; onContinue?: () => void }) {
-  const { t } = useI18n();
-  const isIos = variant === "ios";
-  return (
-    <div className="modal-backdrop" role="dialog" aria-modal="true">
-      <div className="modal modal-wide">
-        <h3>{t(isIos ? "mobileWarning.iosTitle" : "mobileWarning.androidTitle")}</h3>
-        <p className="hint warning">{t(isIos ? "mobileWarning.iosBody" : "mobileWarning.androidBody")}</p>
-        {onContinue && (
-          <div className="modal-actions">
-            <button type="button" className="btn" onClick={onContinue}>
-              {t("mobileWarning.continueAnyway")}
-            </button>
-          </div>
-        )}
       </div>
     </div>
   );

@@ -7,7 +7,7 @@ const en = {
   "mobileWarning.iosBody":
     "Safari (and any browser on iOS) doesn't support Web Bluetooth or Web Serial, and Apple has no plans to add it. To use this configurator over Bluetooth or USB, use a computer.",
   "mobileWarning.androidBody":
-    "On Android, Bluetooth support is limited and can fail. For reliability, use a computer over Bluetooth or USB.",
+    "On Android, Bluetooth support is limited and can fail. The USB port doesn't work on every device either. For reliability, use a computer over Bluetooth or USB.",
   "mobileWarning.continueAnyway": "I understand and want to try anyway",
 
   "via.usb": "USB",

@@ -82,6 +82,25 @@ function makeChannelId(): string {
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   return a.length === b.length && a.every((v, i) => v === b[i]);
 }
+
+/** iPadOS se identifica como "MacIntel" en el user agent (para que las webs no lo traten
+ * como móvil), pero se distingue de un Mac real porque sí tiene pantalla táctil. */
+function isIOSDevice(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent;
+  return /iPhone|iPod|iPad/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+}
+
+/** Combina el user agent (para tablets/Android que no incluyan "Mobile") con el tamaño
+ * físico de pantalla (`screen`, no `innerWidth`, para no confundir una ventana de
+ * escritorio estrecha con un móvil). */
+function isMobileDevice(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent;
+  const mobileUa = /iPhone|iPod|iPad|Android.*Mobile|Windows Phone/i.test(ua);
+  const narrowScreen = typeof window !== "undefined" && Math.min(window.screen.width, window.screen.height) < 640;
+  return mobileUa || narrowScreen;
+}
 type AdvancedTab = "lora" | "channels" | "node" | "position" | "connectivity" | "telemetry";
 
 const ADVANCED_TABS: { id: AdvancedTab; labelKey: MessageKey }[] = [
@@ -229,6 +248,18 @@ function App() {
 
   const serialSupported = isWebSerialSupported();
   const bluetoothSupported = isWebBluetoothSupported();
+  /**
+   * En iPhone/iPad no hay nada que hacer: Safari (y cualquier navegador en iOS, obligado a
+   * usar su motor WebKit) no implementa Web Bluetooth ni Web Serial y Apple no tiene
+   * intención de añadirlo, así que los botones de conectar ya salen deshabilitados por su
+   * cuenta — el aviso es solo para explicar por qué, sin ofrecer ningún "continuar" porque
+   * de verdad no hay vía posible desde este navegador (la única es la app de terceros
+   * Bluefy, que sí implementa Bluetooth). En el resto de móviles si hay Bluetooth, pero tan
+   * poco fiable (ver el resto de esta sesión) que avisamos igual, dejando "continuar" para
+   * quien quiera insistir bajo su responsabilidad.
+   */
+  const [mobileWarningDismissed, setMobileWarningDismissed] = useState(false);
+  const mobileWarningVariant: "ios" | "mobile" | null = isIOSDevice() ? "ios" : isMobileDevice() ? "mobile" : null;
   const [networkAddress, setNetworkAddress] = useState("");
   const [networkPort, setNetworkPort] = useState("4403");
   const [networkTls, setNetworkTls] = useState(false);
@@ -1537,6 +1568,13 @@ function App() {
         </div>
       </main>
 
+      {mobileWarningVariant && !mobileWarningDismissed && (
+        <MobileWarningModal
+          variant={mobileWarningVariant}
+          onContinue={mobileWarningVariant === "mobile" ? () => setMobileWarningDismissed(true) : undefined}
+        />
+      )}
+
       {confirmApplyOpen && conn.status === "connected" && primaryPskBytes !== null && (
         <ConfirmApplyModal
           snapshot={deviceSnapshot}
@@ -1988,6 +2026,26 @@ function ConfirmApplyModal({
             {t("confirmApply.confirm")}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function MobileWarningModal({ variant, onContinue }: { variant: "ios" | "mobile"; onContinue?: () => void }) {
+  const { t } = useI18n();
+  const isIos = variant === "ios";
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true">
+      <div className="modal modal-wide">
+        <h3>{t(isIos ? "mobileWarning.iosTitle" : "mobileWarning.androidTitle")}</h3>
+        <p className="hint warning">{t(isIos ? "mobileWarning.iosBody" : "mobileWarning.androidBody")}</p>
+        {onContinue && (
+          <div className="modal-actions">
+            <button type="button" className="btn" onClick={onContinue}>
+              {t("mobileWarning.continueAnyway")}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

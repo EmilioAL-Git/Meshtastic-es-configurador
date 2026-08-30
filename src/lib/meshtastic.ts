@@ -346,6 +346,45 @@ async function connectBluetoothDeviceWithRetry(
   }
 }
 
+/**
+ * El log nativo de Bluetooth de Android (capturado con `adb logcat` mientras se reproducía
+ * un fallo real) muestra la conexión GATT perfectamente sana — todas las lecturas y
+ * escrituras completadas con `GATT_SUCCESS` — justo cuando Chrome, por su cuenta, decía
+ * "GATT Server is disconnected". Es decir: el fallo no es del hardware ni del sistema, es
+ * el propio Chrome el que pierde la cuenta cuando se solapan una escritura (aplicar
+ * configuración) y una lectura (el nodo sigue recibiendo tráfico de la malla y notificando
+ * paquetes de fondo) sobre la misma conexión — Android solo admite una operación GATT en
+ * vuelo a la vez, y `@meshtastic/transport-web-bluetooth` no serializa lecturas y escrituras
+ * entre sí (el bucle de lectura se dispara solo, sin coordinarse con las escrituras salientes).
+ *
+ * Como el paquete no nos deja controlar esto desde fuera, parcheamos en caliente los métodos
+ * `writeValue`/`readValue` de las dos características (misma cola para ambas, porque compiten
+ * por la misma conexión) para que nunca se ejecuten dos operaciones GATT a la vez, sin tocar
+ * el paquete instalado en node_modules.
+ */
+function serializeGattOperations(transport: TransportWebBluetooth): void {
+  const internals = transport as unknown as {
+    toRadioCharacteristic?: BluetoothRemoteGATTCharacteristic;
+    fromRadioCharacteristic?: BluetoothRemoteGATTCharacteristic;
+  };
+  let queue: Promise<unknown> = Promise.resolve();
+  function serialize<A extends unknown[], R>(fn: (...args: A) => Promise<R>): (...args: A) => Promise<R> {
+    return (...args: A) => {
+      const run = () => fn(...args);
+      const result = queue.then(run, run);
+      queue = result.then(
+        () => undefined,
+        () => undefined,
+      );
+      return result;
+    };
+  }
+  const toRadio = internals.toRadioCharacteristic;
+  const fromRadio = internals.fromRadioCharacteristic;
+  if (toRadio) toRadio.writeValue = serialize(toRadio.writeValue.bind(toRadio));
+  if (fromRadio) fromRadio.readValue = serialize(fromRadio.readValue.bind(fromRadio));
+}
+
 async function connectToBleDevice(
   bleDevice: BluetoothDevice,
   t: TFunction,
@@ -355,6 +394,7 @@ async function connectToBleDevice(
 ): Promise<ConnectResult> {
   return withScreenAwake(async () => {
     const transport = await connectBluetoothDeviceWithRetry(bleDevice, t, onProgress);
+    serializeGattOperations(transport);
     const device = new MeshDevice(transport);
     onDeviceCreated?.(device);
     silenceDeviceLogger(device);

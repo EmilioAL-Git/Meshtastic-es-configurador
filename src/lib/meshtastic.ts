@@ -573,13 +573,18 @@ function sleep(ms: number): Promise<void> {
  * Pausa entre pasos consecutivos de `setConfig`/`setModuleConfig` al aplicar varios seguidos
  * (presets, "Más configuración", perfiles importados). Sin esta pausa, "Más configuración"
  * llega a mandar hasta 9-10 escrituras GATT por Bluetooth una detrás de otra sin ningún
- * margen; eso es justo el patrón que más desestabiliza CoreBluetooth (macOS) y hace que la
- * conexión se caiga a mitad de aplicar aunque el nodo esté a un metro — no es un problema de
- * alcance, es de ráfaga. 600ms le da al radio/pila Bluetooth un margen bastante más holgado
- * para respirar entre paquetes; sigue sin notarse en la duración total salvo cuando de verdad
- * hay muchos pasos que enviar.
+ * margen; eso es justo el patrón que más desestabiliza la pila Bluetooth (tanto en macOS
+ * como en Android) y hace que la conexión se caiga a mitad de aplicar aunque el nodo esté a
+ * un metro — no es un problema de alcance, es de ráfaga. Por USB/red no hace falta este
+ * margen (nunca ha dado problemas ahí), así que solo se alarga para Bluetooth — penalizar
+ * también USB/red con una espera que no necesitan solo alarga la aplicación sin motivo.
  */
-const APPLY_STEP_DELAY_MS = 1500;
+const APPLY_STEP_DELAY_MS_BLUETOOTH = 1500;
+const APPLY_STEP_DELAY_MS_DEFAULT = 600;
+
+function applyStepDelayMs(device: MeshDevice): number {
+  return device.transport instanceof TransportWebBluetooth ? APPLY_STEP_DELAY_MS_BLUETOOTH : APPLY_STEP_DELAY_MS_DEFAULT;
+}
 
 export interface DeviceSnapshotChannel {
   index: number;
@@ -862,7 +867,7 @@ async function applyPresetInner(
   // Da margen tras el handshake de conexión antes del primer envío: por Bluetooth, justo
   // después de conectar el enlace puede seguir asentando la encriptación/negociación GATT
   // (visto en el log nativo de Android como colisiones entre esa fase y la primera escritura).
-  await sleep(APPLY_STEP_DELAY_MS);
+  await sleep(applyStepDelayMs(device));
   onProgress?.(t("progress.sendingLora"), { percent: 5 });
   // Potencia de transmisión: 0 = automático (el firmware calcula el máximo permitido por
   // región). En 868 MHz predeterminamos a 23 dBm (máximo habitual permitido en la banda
@@ -901,7 +906,7 @@ async function applyPresetInner(
   // índice para no resetear moduleSettings (precisión de posición, silenciado) a sus valores
   // por defecto. El canal primario siempre lleva uplink/downlink MQTT activados.
   const existingPrimary = opts.source?.channels.find((c) => c.index === 0)?.settings;
-  await sleep(APPLY_STEP_DELAY_MS);
+  await sleep(applyStepDelayMs(device));
   onProgress?.(t("progress.sendingPrimaryChannel"), { percent: 30 });
   const channelSettings = create(ChannelSettingsSchema, {
     ...existingPrimary,
@@ -918,7 +923,7 @@ async function applyPresetInner(
   for (const [i, additional] of additionalChannels.entries()) {
     const index = i + 1;
     const existingChannel = opts.source?.channels.find((c) => c.index === index)?.settings;
-    await sleep(APPLY_STEP_DELAY_MS);
+    await sleep(applyStepDelayMs(device));
     onProgress?.(t("progress.sendingSecondaryChannel"), { percent: 45 + i * 3 });
     const additionalSettings = create(ChannelSettingsSchema, {
       ...existingChannel,
@@ -935,13 +940,13 @@ async function applyPresetInner(
   const keptIndices = new Set(additionalChannels.map((_, i) => i + 1));
   const removedChannels = (opts.source?.channels ?? []).filter((c) => c.index > 0 && !keptIndices.has(c.index));
   for (const removed of removedChannels) {
-    await sleep(APPLY_STEP_DELAY_MS);
+    await sleep(applyStepDelayMs(device));
     await device.setChannel(
       create(ChannelSchema, { index: removed.index, role: Channel_Role.DISABLED, settings: create(ChannelSettingsSchema, {}) }),
     );
   }
 
-  await sleep(APPLY_STEP_DELAY_MS);
+  await sleep(applyStepDelayMs(device));
   onProgress?.(t("progress.sendingTelemetry"), { percent: 55 });
   // setModuleConfig reemplaza toda la sección de telemetría: sin este spread, campos que no
   // gestiona el preset (sobre todo `deviceTelemetryEnabled`, que controla si se envía
@@ -973,7 +978,7 @@ async function applyPresetInner(
     );
   }
 
-  await sleep(APPLY_STEP_DELAY_MS);
+  await sleep(applyStepDelayMs(device));
   markRebooting();
   await commitEditSettings(device);
   onProgress?.(t("progress.rebooting"), { percent: 96 });
@@ -1169,7 +1174,7 @@ async function sendMoreConfigExtraSections(
   onProgress: ProgressFn | undefined,
 ): Promise<void> {
   const paced = async (run: () => Promise<void>) => {
-    await sleep(APPLY_STEP_DELAY_MS);
+    await sleep(applyStepDelayMs(device));
     await run();
   };
 
@@ -1825,7 +1830,7 @@ async function applyDeviceProfileInner(
 
   const configSections = presentSections(CONFIG_SECTION_LABELS, profile.config as unknown as Record<string, unknown>);
   for (const [i, kind] of configSections.entries()) {
-    if (i > 0) await sleep(APPLY_STEP_DELAY_MS);
+    if (i > 0) await sleep(applyStepDelayMs(device));
     onProgress?.(t("progress.sendingConfigSection", { section: t(CONFIG_SECTION_LABELS[kind]) }), {
       percent: 10 + (i / configSections.length) * 25,
     });
@@ -1838,7 +1843,7 @@ async function applyDeviceProfileInner(
   if (profile.channelUrl) {
     const channelSet = parseChannelUrl(profile.channelUrl);
     for (const [index, settings] of channelSet.settings.entries()) {
-      await sleep(APPLY_STEP_DELAY_MS);
+      await sleep(applyStepDelayMs(device));
       onProgress?.(
         t("progress.sendingChannel", {
           which: index === 0 ? t("progress.channelPrimary") : t("progress.channelSecondary"),
@@ -1861,7 +1866,7 @@ async function applyDeviceProfileInner(
     profile.moduleConfig as unknown as Record<string, unknown>,
   );
   for (const [i, kind] of moduleConfigSections.entries()) {
-    await sleep(APPLY_STEP_DELAY_MS);
+    await sleep(applyStepDelayMs(device));
     onProgress?.(t("progress.sendingModuleConfigSection", { section: t(MODULE_CONFIG_SECTION_LABELS[kind]) }), {
       percent: 60 + (i / moduleConfigSections.length) * 25,
     });
@@ -1871,7 +1876,7 @@ async function applyDeviceProfileInner(
     );
   }
 
-  await sleep(APPLY_STEP_DELAY_MS);
+  await sleep(applyStepDelayMs(device));
   markRebooting();
   await commitEditSettings(device);
   onProgress?.(t("progress.rebooting"), { percent: 90 });

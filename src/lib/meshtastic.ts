@@ -579,7 +579,7 @@ function sleep(ms: number): Promise<void> {
  * para respirar entre paquetes; sigue sin notarse en la duración total salvo cuando de verdad
  * hay muchos pasos que enviar.
  */
-const APPLY_STEP_DELAY_MS = 600;
+const APPLY_STEP_DELAY_MS = 1500;
 
 export interface DeviceSnapshotChannel {
   index: number;
@@ -859,6 +859,10 @@ async function applyPresetInner(
 ): Promise<void> {
   const { region, onProgress } = opts;
 
+  // Da margen tras el handshake de conexión antes del primer envío: por Bluetooth, justo
+  // después de conectar el enlace puede seguir asentando la encriptación/negociación GATT
+  // (visto en el log nativo de Android como colisiones entre esa fase y la primera escritura).
+  await sleep(APPLY_STEP_DELAY_MS);
   onProgress?.(t("progress.sendingLora"), { percent: 5 });
   // Potencia de transmisión: 0 = automático (el firmware calcula el máximo permitido por
   // región). En 868 MHz predeterminamos a 23 dBm (máximo habitual permitido en la banda

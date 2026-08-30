@@ -1,8 +1,9 @@
 import { create, fromBinary, fromJson, toBinary, toJson } from "@bufbuild/protobuf";
-import { MeshDevice, Protobuf, Types } from "@meshtastic/core";
+import { MeshDevice, Protobuf, Types, Utils } from "@meshtastic/core";
 import { TransportWebSerial } from "@meshtastic/transport-web-serial";
 import { TransportWebBluetooth } from "@meshtastic/transport-web-bluetooth";
 import { TransportHTTP } from "@meshtastic/transport-http";
+import { serial as webUsbSerial, SerialPort as WebUsbSerialPort } from "web-serial-polyfill";
 import { ES_CUSTOM_PRESETS, type LoRaPresetDef } from "../presets/loraPresets";
 import type { TelemetryPresetDef } from "../presets/telemetryPresets";
 import type { MessageKey } from "../i18n/locales/es";
@@ -122,8 +123,18 @@ export function translateError(err: unknown, t: TFunction): string {
   return match ? t(match[1]) : message;
 }
 
+/**
+ * Web Serial (`navigator.serial`) es nativo solo en Chrome de escritorio y, desde hace
+ * poco, en Chrome para Android en versiones muy recientes — la mayoría de móviles Android
+ * en circulación (sobre todo los que no reciben actualizaciones de Chrome más allá de
+ * cierta versión) no lo tienen. WebUSB (`navigator.usb`) lleva soportado en Android mucho
+ * más tiempo, así que si falta Serial pero hay WebUSB, `connectSerial` recurre al polyfill
+ * de Google (`web-serial-polyfill`) que habla directamente el protocolo USB CDC-ACM — el
+ * que exponen por USB los nodos con puerto USB nativo del propio chip (p.ej. nRF52840),
+ * sin chip adaptador USB-serie de por medio.
+ */
 export function isWebSerialSupported(): boolean {
-  return typeof navigator !== "undefined" && "serial" in navigator;
+  return typeof navigator !== "undefined" && ("serial" in navigator || "usb" in navigator);
 }
 
 export function isWebBluetoothSupported(): boolean {
@@ -281,13 +292,98 @@ export interface ConnectResult {
   reconnect?: () => Promise<ConnectResult>;
 }
 
+/**
+ * Implementación mínima de `Types.Transport` alrededor de `web-serial-polyfill` (que a su
+ * vez habla WebUSB). No se puede reutilizar `TransportWebSerial` para esto: su código
+ * asume `navigator.serial` para escuchar la desconexión del sistema operativo
+ * (`navigator.serial.addEventListener("disconnect", ...)`), y esa API es precisamente la
+ * que no existe cuando recurrimos a este camino — llamarla haría que fallara con un
+ * `TypeError` inmediato en vez de conectar. Reimplementa el mismo patrón de framing
+ * (`Utils.toDeviceStream`/`fromDeviceStream`, compartido con el resto de transportes del
+ * SDK) pero detecta la desconexión solo por los errores del propio stream de lectura, sin
+ * el evento del sistema operativo.
+ */
+class TransportWebUsbSerial implements Types.Transport {
+  private readonly _toDevice: WritableStream<Uint8Array>;
+  private readonly _fromDevice: ReadableStream<Types.DeviceOutput>;
+  private fromDeviceController?: ReadableStreamDefaultController<Types.DeviceOutput>;
+  private lastStatus: Types.DeviceStatusEnum = Types.DeviceStatusEnum.DeviceDisconnected;
+  private closingByUser = false;
+  private readonly port: WebUsbSerialPort;
+
+  static async create(baudRate = 115200): Promise<TransportWebUsbSerial> {
+    const port = await webUsbSerial.requestPort({ filters: [] });
+    await port.open({ baudRate });
+    return new TransportWebUsbSerial(port);
+  }
+
+  private constructor(port: WebUsbSerialPort) {
+    this.port = port;
+    const toDeviceTransform = Utils.toDeviceStream();
+    toDeviceTransform.readable.pipeTo(port.writable!).catch(() => {
+      this.emitStatus(Types.DeviceStatusEnum.DeviceDisconnected, "write-error");
+    });
+    this._toDevice = toDeviceTransform.writable;
+
+    this._fromDevice = new ReadableStream<Types.DeviceOutput>({
+      start: async (ctrl) => {
+        this.fromDeviceController = ctrl;
+        this.emitStatus(Types.DeviceStatusEnum.DeviceConnecting);
+        const transformed = port.readable!.pipeThrough(Utils.fromDeviceStream());
+        const reader = transformed.getReader();
+        this.emitStatus(Types.DeviceStatusEnum.DeviceConnected);
+        try {
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            ctrl.enqueue(value);
+          }
+          ctrl.close();
+        } catch (error) {
+          if (!this.closingByUser) this.emitStatus(Types.DeviceStatusEnum.DeviceDisconnected, "read-error");
+          ctrl.error(error instanceof Error ? error : new Error(String(error)));
+        } finally {
+          reader.releaseLock();
+        }
+      },
+    });
+  }
+
+  get toDevice(): WritableStream<Uint8Array> {
+    return this._toDevice;
+  }
+
+  get fromDevice(): ReadableStream<Types.DeviceOutput> {
+    return this._fromDevice;
+  }
+
+  async disconnect(): Promise<void> {
+    try {
+      this.closingByUser = true;
+      await this.port.close();
+    } finally {
+      this.emitStatus(Types.DeviceStatusEnum.DeviceDisconnected, "user");
+      this.closingByUser = false;
+    }
+  }
+
+  private emitStatus(next: Types.DeviceStatusEnum, reason?: string): void {
+    if (next === this.lastStatus) return;
+    this.lastStatus = next;
+    this.fromDeviceController?.enqueue({ type: "status", data: { status: next, reason } });
+  }
+}
+
 export async function connectSerial(
   t: TFunction,
   onProgress?: ProgressFn,
   onSnapshot?: (snapshot: DeviceSnapshot) => void,
   onDeviceCreated?: (device: MeshDevice) => void,
 ): Promise<ConnectResult> {
-  const transport = await TransportWebSerial.create();
+  const transport: Types.Transport =
+    typeof navigator !== "undefined" && "serial" in navigator
+      ? await TransportWebSerial.create()
+      : await TransportWebUsbSerial.create();
   const device = new MeshDevice(transport);
   onDeviceCreated?.(device);
   silenceDeviceLogger(device);

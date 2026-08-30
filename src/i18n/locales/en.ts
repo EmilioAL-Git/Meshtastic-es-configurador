@@ -5,9 +5,9 @@ const en = {
   "browserWarning": "Your browser doesn't support Web Serial or Web Bluetooth. Use desktop Chrome or Edge.",
 
   "mobileWarning.iosBody":
-    "Safari (and any browser on iOS) doesn't support Web Bluetooth or Web Serial, and Apple has no plans to add it — there's nothing that can be done from here. The only way to use this configurator over Bluetooth on iPhone is to open this same page inside the \"Bluefy – Web BLE Browser\" app (available on the App Store). For USB, use a computer or the official Meshtastic app.",
+    "Safari (and any browser on iOS) doesn't support Web Bluetooth or Web Serial, and Apple has no plans to add it. To use this configurator over Bluetooth or USB, use a computer.",
   "mobileWarning.androidBody":
-    "On Android, Bluetooth through the browser can fail or disconnect intermittently while applying changes (a limitation of Chrome on Android, not of this configurator or the node). For reliability, use a computer over USB.",
+    "On Android, Bluetooth support is limited and can fail. For reliability, use a computer over Bluetooth or USB.",
   "mobileWarning.continueAnyway": "I understand and want to try anyway",
 
   "via.usb": "USB",

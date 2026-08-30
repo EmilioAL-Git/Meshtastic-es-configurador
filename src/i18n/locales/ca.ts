@@ -5,9 +5,9 @@ const ca = {
   "browserWarning": "El teu navegador no admet Web Serial ni Web Bluetooth. Fes servir Chrome o Edge d'escriptori.",
 
   "mobileWarning.iosBody":
-    "Safari (i qualsevol navegador a iOS) no admet Web Bluetooth ni Web Serial, i Apple no té previst afegir-ho — no hi ha res a fer des d'aquí. L'única manera d'utilitzar aquest configurador per Bluetooth a l'iPhone és obrir aquesta mateixa pàgina dins l'app \"Bluefy – Web BLE Browser\" (disponible a l'App Store). Per a USB, fes servir un ordinador o l'app oficial de Meshtastic.",
+    "Safari (i qualsevol navegador a iOS) no admet Web Bluetooth ni Web Serial, i Apple no té previst afegir-ho. Per utilitzar aquest configurador per Bluetooth o USB, fes servir un ordinador.",
   "mobileWarning.androidBody":
-    "A Android, el Bluetooth pel navegador pot fallar o desconnectar-se de manera intermitent en aplicar canvis (una limitació de Chrome a Android, no d'aquest configurador ni del node). Per a més fiabilitat, fes servir un ordinador per USB.",
+    "A Android, l'ús del Bluetooth és limitat i pot fallar. Per a més fiabilitat, fes servir un ordinador per Bluetooth o USB.",
   "mobileWarning.continueAnyway": "Ho entenc i vull intentar-ho igualment",
 
   "via.usb": "USB",

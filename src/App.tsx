@@ -260,6 +260,9 @@ function App() {
    */
   const [mobileWarningDismissed, setMobileWarningDismissed] = useState(false);
   const mobileWarningVariant: "ios" | "mobile" | null = isIOSDevice() ? "ios" : isMobileDevice() ? "mobile" : null;
+  // Mientras haya aviso de móvil sin descartar, los botones de Bluetooth/USB se quedan
+  // deshabilitados — en iPhone nunca se descarta (no hay botón), así que ahí es permanente.
+  const mobileWarningGateActive = mobileWarningVariant !== null && !mobileWarningDismissed;
   const [networkAddress, setNetworkAddress] = useState("");
   const [networkPort, setNetworkPort] = useState("4403");
   const [networkTls, setNetworkTls] = useState(false);
@@ -735,7 +738,7 @@ function App() {
             <button
               type="button"
               className="btn"
-              disabled={!serialSupported || conn.status === "connecting" || conn.status === "connected"}
+              disabled={!serialSupported || mobileWarningGateActive || conn.status === "connecting" || conn.status === "connected"}
               onClick={() => handleConnect("usb")}
             >
               {t("connect.usb")}
@@ -743,7 +746,7 @@ function App() {
             <button
               type="button"
               className="btn"
-              disabled={!bluetoothSupported || conn.status === "connecting" || conn.status === "connected"}
+              disabled={!bluetoothSupported || mobileWarningGateActive || conn.status === "connecting" || conn.status === "connected"}
               onClick={() => handleConnect("bluetooth")}
             >
               {t("connect.bluetooth")}
